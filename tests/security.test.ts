@@ -1,6 +1,17 @@
 /**
  * Automated Security & Validation Test Suite for OMNI CHANNEL PLUS
  *
+ * INTEGRATION suite: targets a live server (default http://localhost:3000,
+ * override with TEST_URL). Executed automatically by tests/runIntegration.ts,
+ * which spawns an ISOLATED server instance on a dedicated port with
+ * GEMINI_API_KEY stripped from the environment, so these tests:
+ *   - never call the paid Gemini API (all generation asserts the labelled
+ *     local deterministic fallback),
+ *   - start with fresh in-memory rate-limit windows (deterministic 429s).
+ *
+ * Can still be run manually against your own server:
+ *   TEST_URL=http://localhost:3000 tsx tests/security.test.ts
+ *
  * Covers:
  * 1. Missing topic
  * 2. Empty topic
@@ -9,13 +20,19 @@
  * 5. Null brandVoice
  * 6. Null language
  * 7. Null objective
- * 8. Excessive generation requests (rate limiting - 10 req/min)
- * 9. Excessive AI status probes (rate limiting - 15 req/min)
- * 10. AI status caching within 60-second TTL
- * 11. Missing/unconfigured Gemini key behavior
- * 12. Valid fallback response generation & schema compliance
- * 13. Numeric TRUST_PROXY_HOPS resolution and rejection of boolean true
+ * 8. Health accuracy (supabaseReady false, storageMode, proxy hops)
+ * 8b. Numeric TRUST_PROXY_HOPS resolution and rejection of boolean true
+ * 8c. Cascade brand deletion (pure unit)
+ * 8d. Active brand reassignment (pure unit)
+ * 8e. Calendar event deletion sync (pure unit)
+ * 8f. Rescheduling without duplicate events (pure unit)
+ * 8g. Neutral empty compliance statistics (pure unit)
+ * 9. AI status caching within 60-second TTL
+ * 10. Valid labelled fallback response generation & schema compliance
+ * 11. Generation rate limiting (429 at >10 req/min)
+ * 12. AI status probe rate limiting (429 at >15 req/min)
  */
+import { pathToFileURL } from 'url';
 import { resolveTrustProxyHops } from '../src/utils/proxy';
 import {
   cascadeDeleteBrand,
@@ -59,7 +76,7 @@ async function assertTest(name: string, fn: () => Promise<{ passed: boolean; exp
   }
 }
 
-async function runAllTests() {
+async function runAllTests(): Promise<boolean> {
   console.log(`\n========================================`);
   console.log(`Running Security & Validation Test Suite`);
   console.log(`Target: ${BASE_URL}`);
@@ -80,7 +97,8 @@ async function runAllTests() {
     }
   } catch (err: any) {
     console.error(`Cannot connect to server at ${BASE_URL}:`, err.message);
-    process.exit(1);
+    console.error('Start the server first (npm run dev) or use tests/runIntegration.ts, which spawns one automatically.');
+    return false;
   }
 
   // 1. Missing topic
@@ -490,12 +508,22 @@ async function runAllTests() {
   console.log(`Summary: ${totalPassed} / ${results.length} tests passed.`);
   console.log(`----------------------------------------\n`);
 
-  if (totalPassed !== results.length) {
-    process.exit(1);
-  }
+  return totalPassed === results.length;
 }
 
-runAllTests().catch(err => {
-  console.error('Fatal test runner error:', err);
-  process.exit(1);
-});
+/**
+ * Exported for tests/runIntegration.ts. When this file is executed directly,
+ * the suite runs against TEST_URL (or localhost:3000) and sets the exit code.
+ */
+export { runAllTests };
+
+const isDirectExecution = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isDirectExecution) {
+  runAllTests().then(ok => {
+    process.exit(ok ? 0 : 1);
+  }).catch(err => {
+    console.error('Fatal test runner error:', err);
+    process.exit(1);
+  });
+}
