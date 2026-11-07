@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { PlatformIcon } from '../common/PlatformIcon';
 import { PLATFORMS_CONFIG } from '../../services/constants';
+import { selectUpcomingEvents } from '../../utils/dataIntegrity';
 
 export const DashboardView: React.FC = () => {
   const { setActiveSection, stats, drafts, calendarEvents, activeBrand, brands } = useApp();
@@ -20,8 +21,9 @@ export const DashboardView: React.FC = () => {
   // Get 4 most recent drafts
   const recentDrafts = drafts.slice(0, 4);
 
-  // Get upcoming 3 calendar events
-  const upcomingEvents = calendarEvents.slice(0, 3);
+  // Upcoming events: filtered to now-or-later and sorted chronologically,
+  // so past events never appear as "upcoming" (audit item D-6).
+  const upcomingEvents = selectUpcomingEvents(calendarEvents, new Date(), 3);
 
   return (
     <div className="space-y-6">
@@ -98,8 +100,8 @@ export const DashboardView: React.FC = () => {
           </div>
           <div className="text-[11px] text-zinc-500">
             {stats.hasEvaluatedContent
-              ? 'Passed style & length checks (non-legal)'
-              : 'Neutral: no drafts to evaluate'}
+              ? `Passed style & length checks (non-legal) · ${stats.evaluatedCount} evaluated`
+              : 'Neutral: no evaluated drafts yet'}
           </div>
         </div>
 

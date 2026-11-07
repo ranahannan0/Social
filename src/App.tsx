@@ -43,7 +43,9 @@ const AppContent: React.FC = () => {
             <div className="flex items-center gap-3">
               <span>Phase 1 Foundation Active</span>
               <span aria-hidden="true">·</span>
-              <span>Gemini 3.8 Flash SDK</span>
+              {/* Model-agnostic label: the active Gemini model is env-configured
+                  (GEMINI_MODEL) and must not be hardcoded in UI copy. */}
+              <span>Server-side Gemini SDK</span>
             </div>
           </div>
         </footer>

@@ -87,7 +87,13 @@ export interface ContentDraft {
   keyTakeaways?: string[];
   status: ContentStatus;
   scheduledDate?: string;
-  complianceStatus: ComplianceCheckResult;
+  /**
+   * Editorial quality evaluation result (anti-fluff + length checks).
+   * Optional BY CONTRACT: drafts restored from older localStorage payloads
+   * may predate this field, and code must treat missing values as
+   * "not yet evaluated" (never counted as passed or failed).
+   */
+  complianceStatus?: ComplianceCheckResult;
   createdAt: string;
   updatedAt: string;
 }
