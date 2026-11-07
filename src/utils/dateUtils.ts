@@ -28,6 +28,15 @@ export function toLocalDateKey(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
+/**
+ * Returns a local YYYY-MM-DD date string for a given Date object (defaulting to now).
+ * Compatibility alias for `toLocalDateKey` introduced by the parallel upstream
+ * fix (commit a8c68ed); kept so both call-site conventions keep working.
+ */
+export function getLocalDateString(d: Date = new Date()): string {
+  return toLocalDateKey(d);
+}
+
 /** Returns a new Date shifted by N days, preserving local time-of-day. */
 export function addDays(date: Date, amount: number): Date {
   const next = new Date(date);
@@ -56,4 +65,26 @@ export function formatEventStamp(dateKey: string, timeKey: string): string {
  */
 export function eventSortKey(event: { date: string; time: string }): string {
   return `${event.date}T${event.time}`;
+}
+
+/**
+ * Formats a Date object or YYYY-MM-DD string (with optional HH:mm) into an
+ * Asia/Karachi (PKT, UTC+5) display string.
+ *
+ * DISPLAY-ONLY helper: Phase 1 stores local naive values, so this is only
+ * correct when the operator's browser timezone is Karachi — the documented
+ * Phase 1 workspace policy. True zone-aware scheduling arrives with Phase 2
+ * (timestamptz columns).
+ */
+export function formatKarachiDateTime(dateInput: Date | string, timeStr?: string): string {
+  const d = typeof dateInput === 'string' ? new Date(`${dateInput}T${timeStr || '00:00'}:00`) : dateInput;
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Karachi',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(d);
+  } catch {
+    return d.toLocaleString();
+  }
 }

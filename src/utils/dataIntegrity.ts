@@ -168,6 +168,9 @@ export function syncScheduleDraft(params: {
       : d
   );
 
+  // Keep the FIRST existing event as canonical (position preserved) and purge
+  // any additional duplicates (audit item D-1; parallel upstream fix a8c68ed
+  // resolves the same issue with an equivalent purge).
   const existingEvents = calendarEvents.filter(e => e.draftId === draftId);
   let updatedEvents: CalendarEvent[];
 
@@ -249,11 +252,16 @@ export function calculateComplianceStats(params: {
   const ready = drafts.filter(d => d.status === 'ready').length;
   const scheduled = calendarEvents.filter(e => e.status === 'scheduled').length;
 
+  // Only drafts with an ACTUAL evaluation result count as evaluated
+  // (guards against both undefined and legacy null values).
   const evaluatedDrafts = drafts.filter(d => d.complianceStatus !== undefined && d.complianceStatus !== null);
+  const evaluatedCount = evaluatedDrafts.length;
   const passedQuality = evaluatedDrafts.filter(d => d.complianceStatus?.passed).length;
 
+  // Pass rate is calculated ONLY over evaluated drafts; neutral null when none.
   const compliancePassRate: number | null =
-    evaluatedDrafts.length > 0 ? Math.round((passedQuality / evaluatedDrafts.length) * 100) : null;
+    evaluatedCount > 0 ? Math.round((passedQuality / evaluatedCount) * 100) : null;
+  const hasEvaluatedContent = evaluatedCount > 0;
 
   const breakdown: Record<PlatformType, number> = {
     linkedin: 0,
@@ -281,7 +289,7 @@ export function calculateComplianceStats(params: {
     totalBrands: brands.length,
     evaluatedCount: evaluatedDrafts.length,
     compliancePassRate,
-    hasEvaluatedContent: evaluatedDrafts.length > 0,
+    hasEvaluatedContent,
     platformBreakdown: breakdown,
   };
 }

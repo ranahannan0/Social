@@ -25,7 +25,8 @@ export const ContentCalendarView: React.FC = () => {
 
   const [viewMode, setViewMode] = useState<CalendarViewMode>('month');
   // Opens on the ACTUAL current date (audit item B-3: was frozen at Nov 2026).
-  const [currentDate, setCurrentDate] = useState<Date>(new Date());
+  // Lazy initializer avoids constructing a Date on every render.
+  const [currentDate, setCurrentDate] = useState<Date>(() => new Date());
 
   // Selected event modal
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
