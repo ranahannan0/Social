@@ -1,0 +1,6 @@
+{
+  "name": "OMNI CHANNEL PLUS",
+  "description": "AI-powered omni-channel marketing and social media growth engine with brand workspace, content studio, library, and calendar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
