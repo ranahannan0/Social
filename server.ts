@@ -1,9 +1,11 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 
@@ -13,13 +15,40 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(express.json({ limit: '10mb' }));
+// Security: Disable Express fingerprinting
+app.disable('x-powered-by');
 
-// Initialize Gemini SDK with User-Agent as instructed by guidelines
-const apiKey = process.env.GEMINI_API_KEY || '';
-const ai = apiKey
+// Security: Configure trust proxy for Cloud Run and reverse-proxy deployment environments
+app.set('trust proxy', 1);
+
+// Security: Apply security headers via helmet
+// Allow iframe embedding in Google AI Studio and Vite inline scripts in dev
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    frameguard: false, // Required for AI Studio iframe preview
+    xContentTypeOptions: true,
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  })
+);
+
+// Security: Reduce JSON request body size limit to 64kb (appropriate for text-only inputs)
+app.use(express.json({ limit: '64kb' }));
+
+// Environment configuration
+const configuredModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const rawApiKey = (process.env.GEMINI_API_KEY || '').trim();
+
+// Treat empty string or default example placeholder as unconfigured
+const isKeyConfigured = Boolean(
+  rawApiKey && rawApiKey !== '' && rawApiKey !== 'MY_GEMINI_API_KEY'
+);
+
+// Initialize Gemini SDK with User-Agent telemetry if real key is configured
+const ai = isKeyConfigured
   ? new GoogleGenAI({
-      apiKey,
+      apiKey: rawApiKey,
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build',
@@ -27,6 +56,37 @@ const ai = apiKey
       },
     })
   : null;
+
+// Supported domain enums for validation
+const SUPPORTED_PLATFORMS = [
+  'linkedin',
+  'x',
+  'instagram_reels',
+  'instagram_feed',
+  'youtube',
+  'tiktok',
+  'pinterest',
+  'whatsapp',
+  'email',
+  'blog_seo',
+] as const;
+
+const SUPPORTED_LANGUAGES = [
+  'English',
+  'Roman Urdu',
+  'Urdu (Script)',
+  'Hindi',
+  'Spanish',
+  'Arabic',
+] as const;
+
+const SUPPORTED_OBJECTIVES = [
+  'Awareness',
+  'Lead Gen',
+  'Authority',
+  'Sales',
+  'Engagement',
+] as const;
 
 // Banned AI Fluff Phrases as codified in Omni Channel Plus v2.0 Spec Appendix
 const BANNED_PHRASES = [
@@ -48,7 +108,6 @@ const BANNED_PHRASES = [
   "leverage",
 ];
 
-// Helper to check for banned phrases
 function detectBannedPhrases(text: string): string[] {
   if (!text) return [];
   const lower = text.toLowerCase();
@@ -69,6 +128,20 @@ const PLATFORM_LIMITS: Record<string, { maxChars: number; defaultHashtags: numbe
   blog_seo: { maxChars: 25000, defaultHashtags: 0 },
 };
 
+// Rate limiter: 10 generation requests per minute per IP
+const generateRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req: Request, res: Response) => {
+    res.status(429).json({
+      error: 'Rate limit exceeded. Maximum 10 generation requests per minute allowed.',
+      retryAfterSeconds: 60,
+    });
+  },
+});
+
 // Helper with timeout to prevent hanging if external connection experiences latency
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMsg: string): Promise<T> {
   return Promise.race([
@@ -77,26 +150,166 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMsg: string
   ]);
 }
 
-// API: Health & AI status check
+// Validation interface
+interface ValidationErrorDetail {
+  field: string;
+  message: string;
+}
+
+// Middleware: Strict request body validation for /api/generate
+function validateGenerateRequest(req: Request, res: Response, next: NextFunction) {
+  const errors: ValidationErrorDetail[] = [];
+  const body = req.body;
+
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return res.status(400).json({
+      error: 'Invalid request payload: expected JSON object.',
+      validationErrors: [{ field: 'body', message: 'Request body must be a JSON object' }],
+    });
+  }
+
+  // 1. Topic validation (required, string, 1-300 chars)
+  if (typeof body.topic !== 'string') {
+    errors.push({ field: 'topic', message: 'Topic is required and must be a string' });
+  } else {
+    const trimmed = body.topic.trim();
+    if (trimmed.length === 0) {
+      errors.push({ field: 'topic', message: 'Topic cannot be empty or whitespace' });
+    } else if (trimmed.length > 300) {
+      errors.push({ field: 'topic', message: 'Topic cannot exceed 300 characters' });
+    }
+  }
+
+  // 2. Audience validation (optional string, max 300 chars)
+  if (body.audience !== undefined && body.audience !== null) {
+    if (typeof body.audience !== 'string') {
+      errors.push({ field: 'audience', message: 'Audience must be a string' });
+    } else if (body.audience.length > 300) {
+      errors.push({ field: 'audience', message: 'Audience cannot exceed 300 characters' });
+    }
+  }
+
+  // 3. Brand name validation (optional string, max 100 chars)
+  if (body.brandName !== undefined && body.brandName !== null) {
+    if (typeof body.brandName !== 'string') {
+      errors.push({ field: 'brandName', message: 'Brand name must be a string' });
+    } else if (body.brandName.length > 100) {
+      errors.push({ field: 'brandName', message: 'Brand name cannot exceed 100 characters' });
+    }
+  }
+
+  // 4. Custom instructions validation (optional string, max 1000 chars)
+  if (body.customInstructions !== undefined && body.customInstructions !== null) {
+    if (typeof body.customInstructions !== 'string') {
+      errors.push({ field: 'customInstructions', message: 'Custom instructions must be a string' });
+    } else if (body.customInstructions.length > 1000) {
+      errors.push({ field: 'customInstructions', message: 'Custom instructions cannot exceed 1000 characters' });
+    }
+  }
+
+  // 5. Platform validation (must be in SUPPORTED_PLATFORMS)
+  if (body.platform !== undefined && body.platform !== null) {
+    if (typeof body.platform !== 'string' || !SUPPORTED_PLATFORMS.includes(body.platform as any)) {
+      errors.push({
+        field: 'platform',
+        message: `Platform must be one of: ${SUPPORTED_PLATFORMS.join(', ')}`,
+      });
+    }
+  }
+
+  // 6. Language validation (must be in SUPPORTED_LANGUAGES)
+  if (body.language !== undefined && body.language !== null) {
+    if (typeof body.language !== 'string' || !SUPPORTED_LANGUAGES.includes(body.language as any)) {
+      errors.push({
+        field: 'language',
+        message: `Language must be one of: ${SUPPORTED_LANGUAGES.join(', ')}`,
+      });
+    }
+  }
+
+  // 7. Objective validation (must be in SUPPORTED_OBJECTIVES)
+  if (body.objective !== undefined && body.objective !== null) {
+    if (typeof body.objective !== 'string' || !SUPPORTED_OBJECTIVES.includes(body.objective as any)) {
+      errors.push({
+        field: 'objective',
+        message: `Marketing objective must be one of: ${SUPPORTED_OBJECTIVES.join(', ')}`,
+      });
+    }
+  }
+
+  // 8. Brand voice validation (optional object)
+  if (body.brandVoice !== undefined && body.brandVoice !== null) {
+    if (typeof body.brandVoice !== 'object' || Array.isArray(body.brandVoice)) {
+      errors.push({ field: 'brandVoice', message: 'Brand voice must be a JSON object' });
+    } else {
+      if (body.brandVoice.tone !== undefined && body.brandVoice.tone !== null) {
+        if (typeof body.brandVoice.tone !== 'string') {
+          errors.push({ field: 'brandVoice.tone', message: 'Brand voice tone must be a string' });
+        } else if (body.brandVoice.tone.length > 300) {
+          errors.push({ field: 'brandVoice.tone', message: 'Brand voice tone cannot exceed 300 characters' });
+        }
+      }
+
+      if (body.brandVoice.styleGuidelines !== undefined && body.brandVoice.styleGuidelines !== null) {
+        if (typeof body.brandVoice.styleGuidelines !== 'string') {
+          errors.push({ field: 'brandVoice.styleGuidelines', message: 'Style guidelines must be a string' });
+        } else if (body.brandVoice.styleGuidelines.length > 500) {
+          errors.push({ field: 'brandVoice.styleGuidelines', message: 'Style guidelines cannot exceed 500 characters' });
+        }
+      }
+
+      if (body.brandVoice.bannedWords !== undefined && body.brandVoice.bannedWords !== null) {
+        if (!Array.isArray(body.brandVoice.bannedWords)) {
+          errors.push({ field: 'brandVoice.bannedWords', message: 'Banned words must be an array of strings' });
+        } else {
+          if (body.brandVoice.bannedWords.length > 50) {
+            errors.push({ field: 'brandVoice.bannedWords', message: 'Banned words array cannot exceed 50 items' });
+          }
+          for (let i = 0; i < body.brandVoice.bannedWords.length; i++) {
+            const word = body.brandVoice.bannedWords[i];
+            if (typeof word !== 'string') {
+              errors.push({ field: `brandVoice.bannedWords[${i}]`, message: 'Every banned word must be a string' });
+              break;
+            } else if (word.length > 50) {
+              errors.push({ field: `brandVoice.bannedWords[${i}]`, message: 'Banned word entry cannot exceed 50 characters' });
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    return res.status(400).json({
+      error: 'Validation failed for content generation request.',
+      validationErrors: errors,
+    });
+  }
+
+  next();
+}
+
+// API: Health check (Task 4: accurate status, configurable model, supabaseReady=false)
 app.get('/api/health', (req: Request, res: Response) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    aiConfigured: Boolean(apiKey),
-    model: 'gemini-3.8-flash',
+    aiConfigured: isKeyConfigured,
+    model: configuredModel,
     version: '2.0-phase1',
     storageMode: 'localStorage_demo',
-    supabaseReady: true,
+    supabaseReady: false,
   });
 });
 
-// API: AI Status probe for Settings view
+// API: AI Status probe for Settings view (Task 4: accurate live probe, no false positives)
 app.get('/api/ai-status', async (req: Request, res: Response) => {
-  if (!ai || !apiKey) {
+  if (!isKeyConfigured || !ai) {
     return res.json({
       connected: false,
-      message: 'GEMINI_API_KEY is not configured in environment. Content studio will use built-in intelligent fallback generation.',
-      model: 'gemini-3.8-flash',
+      message: 'GEMINI_API_KEY is not configured or contains placeholder value. Content Studio uses local deterministic fallback.',
+      model: configuredModel,
       testedAt: new Date().toISOString(),
       latencyMs: null,
     });
@@ -106,7 +319,7 @@ app.get('/api/ai-status', async (req: Request, res: Response) => {
   try {
     const testRes = await withTimeout(
       ai.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model: configuredModel,
         contents: 'Respond with exactly: OMNI_CHANNEL_PLUS_OK',
       }),
       8000,
@@ -115,46 +328,49 @@ app.get('/api/ai-status', async (req: Request, res: Response) => {
     const latency = Date.now() - start;
     return res.json({
       connected: true,
-      message: 'Gemini 3.8 Flash operational and ready.',
-      model: 'gemini-3.8-flash',
+      message: `${configuredModel} operational and ready.`,
+      model: configuredModel,
       testedAt: new Date().toISOString(),
       latencyMs: latency,
       responseSample: testRes.text?.trim(),
     });
   } catch (error: any) {
+    const sanitizedError = error instanceof Error ? error.message : 'Unknown provider error';
+    console.error('[AI Status Probe] Failed to probe Gemini API:', sanitizedError);
+
     return res.json({
       connected: false,
-      message: error?.message || 'Error communicating with Gemini API',
-      model: 'gemini-3.8-flash',
+      message: 'Upstream AI model probe failed or timed out. Studio will use safe local fallback.',
+      model: configuredModel,
       testedAt: new Date().toISOString(),
       latencyMs: Date.now() - start,
     });
   }
 });
 
-// API: Content Generation Endpoint
-app.post('/api/generate', async (req: Request, res: Response) => {
-  const {
-    topic,
-    platform = 'linkedin',
-    audience,
-    objective = 'Awareness',
-    language = 'English',
-    brandName = 'OmniBrand',
-    brandVoice = {},
-    customInstructions = '',
-  } = req.body;
+// API: Hardened Content Generation Endpoint (Tasks 1, 2, 3)
+app.post(
+  '/api/generate',
+  generateRateLimiter,
+  validateGenerateRequest,
+  async (req: Request, res: Response) => {
+    const {
+      topic,
+      platform = 'linkedin',
+      audience = '',
+      objective = 'Awareness',
+      language = 'English',
+      brandName = 'OmniBrand',
+      brandVoice = {},
+      customInstructions = '',
+    } = req.body;
 
-  if (!topic || typeof topic !== 'string') {
-    return res.status(400).json({ error: 'Topic or seed keyword is required.' });
-  }
+    const platformMeta = PLATFORM_LIMITS[platform] || { maxChars: 2500, defaultHashtags: 3 };
 
-  const platformMeta = PLATFORM_LIMITS[platform] || { maxChars: 2500, defaultHashtags: 3 };
-
-  // If Gemini API is available, invoke Gemini 3.8 Flash
-  if (ai && apiKey) {
-    try {
-      const prompt = `
+    // If Gemini API key is configured, invoke Gemini with timeout and error handling
+    if (isKeyConfigured && ai) {
+      try {
+        const prompt = `
 You are the Content Studio Engine of OMNI CHANNEL PLUS v2.0.
 Generate high-converting, platform-native content according to the master spec.
 
@@ -186,86 +402,116 @@ CRITICAL COMPLIANCE RULES:
 Respond with strict JSON matching this schema.
 `;
 
-      const response = await withTimeout(
-        ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: prompt,
-          config: {
-            systemInstruction: `You are the Omni Channel Plus AI Content Studio Engine. You craft human-sounding, punchy, platform-optimized marketing assets. Never use AI fluff phrases. Output strict valid JSON only.`,
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                title: { type: Type.STRING, description: 'Short descriptive title for this project' },
-                hooks: {
-                  type: Type.OBJECT,
-                  properties: {
-                    patternInterrupt: { type: Type.STRING, description: 'Pattern Interrupt hook variation' },
-                    curiosityGap: { type: Type.STRING, description: 'Curiosity Gap hook variation' },
-                    directBenefit: { type: Type.STRING, description: 'Direct Benefit hook variation' },
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model: configuredModel,
+            contents: prompt,
+            config: {
+              systemInstruction: `You are the Omni Channel Plus AI Content Studio Engine. You craft human-sounding, punchy, platform-optimized marketing assets. Never use AI fluff phrases. Output strict valid JSON only.`,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING, description: 'Short descriptive title for this project' },
+                  hooks: {
+                    type: Type.OBJECT,
+                    properties: {
+                      patternInterrupt: { type: Type.STRING, description: 'Pattern Interrupt hook variation' },
+                      curiosityGap: { type: Type.STRING, description: 'Curiosity Gap hook variation' },
+                      directBenefit: { type: Type.STRING, description: 'Direct Benefit hook variation' },
+                    },
+                    required: ['patternInterrupt', 'curiosityGap', 'directBenefit'],
                   },
-                  required: ['patternInterrupt', 'curiosityGap', 'directBenefit'],
+                  primaryCaption: { type: Type.STRING, description: 'Complete body caption using the best hook' },
+                  callToAction: { type: Type.STRING, description: 'High-converting platform CTA' },
+                  hashtags: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: 'Relevant non-spammy hashtags without #'
+                  },
+                  keyTakeaways: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: '3 core insights from the content'
+                  },
+                  targetAudienceNote: { type: Type.STRING, description: 'Why this resonates with the chosen audience' },
+                  visualDirection: { type: Type.STRING, description: 'Visual or B-roll recommendation' },
                 },
-                primaryCaption: { type: Type.STRING, description: 'Complete body caption using the best hook' },
-                callToAction: { type: Type.STRING, description: 'High-converting platform CTA' },
-                hashtags: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: 'Relevant non-spammy hashtags without #'
-                },
-                keyTakeaways: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: '3 core insights from the content'
-                },
-                targetAudienceNote: { type: Type.STRING, description: 'Why this resonates with the chosen audience' },
-                visualDirection: { type: Type.STRING, description: 'Visual or B-roll recommendation' },
+                required: ['title', 'hooks', 'primaryCaption', 'callToAction', 'hashtags', 'keyTakeaways'],
               },
-              required: ['title', 'hooks', 'primaryCaption', 'callToAction', 'hashtags', 'keyTakeaways'],
             },
+          }),
+          14000,
+          'Gemini generation timed out'
+        );
+
+        const parsed = JSON.parse(response.text || '{}');
+        const detectedFluff = detectBannedPhrases(parsed.primaryCaption || '');
+
+        return res.json({
+          success: true,
+          source: configuredModel,
+          isFallback: false,
+          data: {
+            ...parsed,
+            detectedFluff,
+            platformLimit: platformMeta.maxChars,
+            charCount: (parsed.primaryCaption || '').length,
+            generatedAt: new Date().toISOString(),
           },
-        }),
-        14000,
-        'Gemini generation timed out'
-      );
+        });
+      } catch (err: any) {
+        // Sanitize error logging: never log API keys or raw tokens
+        const sanitizedMsg = err instanceof Error ? err.message : 'Unknown generation error';
+        console.error('[Gemini Generation] Upstream error, engaging local deterministic fallback:', sanitizedMsg);
 
-      const parsed = JSON.parse(response.text || '{}');
-      const detectedFluff = detectBannedPhrases(parsed.primaryCaption || '');
+        // Safe client message without leaking internal URLs or credentials
+        const fallbackReason = sanitizedMsg.toLowerCase().includes('timed out')
+          ? 'upstream_timeout'
+          : sanitizedMsg.toLowerCase().includes('quota') || sanitizedMsg.toLowerCase().includes('429')
+          ? 'quota_exceeded'
+          : 'upstream_unavailable';
 
-      return res.json({
-        success: true,
-        source: 'gemini-3.8-flash',
-        data: {
-          ...parsed,
-          detectedFluff,
-          platformLimit: platformMeta.maxChars,
-          charCount: (parsed.primaryCaption || '').length,
-          generatedAt: new Date().toISOString(),
-        },
-      });
-    } catch (err: any) {
-      console.error('Gemini generation failed, falling back to deterministic engine:', err);
-      // Fallback cleanly below with notice
+        const fallback = generateIntelligentFallback({
+          topic,
+          platform,
+          audience: audience || 'Professional decision makers',
+          objective,
+          language,
+          brandName,
+        });
+
+        return res.json({
+          success: true,
+          source: 'local_deterministic_engine',
+          isFallback: true,
+          fallbackReason,
+          note: 'Content generated using local deterministic engine. Upstream Gemini API call was unavailable or timed out.',
+          data: fallback,
+        });
+      }
     }
+
+    // Deterministic Intelligent Fallback when no API key is configured
+    const fallback = generateIntelligentFallback({
+      topic,
+      platform,
+      audience: audience || 'Professional decision makers',
+      objective,
+      language,
+      brandName,
+    });
+
+    return res.json({
+      success: true,
+      source: 'local_deterministic_engine',
+      isFallback: true,
+      fallbackReason: 'missing_api_key',
+      note: 'Content generated using local deterministic engine. Configure GEMINI_API_KEY in the Secrets panel to enable live Gemini AI generation.',
+      data: fallback,
+    });
   }
-
-  // Deterministic Intelligent Fallback (if no API key or API temporarily unavailable)
-  const fallback = generateIntelligentFallback({
-    topic,
-    platform,
-    audience: audience || 'Professional decision makers',
-    objective,
-    language,
-    brandName,
-  });
-
-  return res.json({
-    success: true,
-    source: 'local_deterministic_engine',
-    note: apiKey ? 'Fallback triggered due to upstream API notice.' : 'Generated using local template engine (Gemini API key not set).',
-    data: fallback,
-  });
-});
+);
 
 // Fallback generator matching Omni Channel Plus specification
 function generateIntelligentFallback(params: {

@@ -81,6 +81,8 @@ export const ContentStudioView: React.FC = () => {
   const [savedDraft, setSavedDraft] = useState<ContentDraft | null>(null);
   const [copied, setCopied] = useState(false);
   const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
+  const [isFallback, setIsFallback] = useState(false);
+  const [generationNote, setGenerationNote] = useState<string | null>(null);
 
   // Sync brand defaults when active brand changes
   useEffect(() => {
@@ -135,6 +137,8 @@ export const ContentStudioView: React.FC = () => {
         setVisualDirection(res.data.visualDirection || '');
         setKeyTakeaways(res.data.keyTakeaways || []);
         setGenerationSource(res.source);
+        setIsFallback(Boolean(res.isFallback));
+        setGenerationNote(res.note || null);
       }
     } catch (err: any) {
       setGenerationError(err.message || 'Generation failed. Please try again.');
@@ -221,14 +225,20 @@ export const ContentStudioView: React.FC = () => {
             Generate Platform-Optimized Campaigns
           </h2>
           <p className="text-xs text-zinc-400">
-            Powered by Gemini 3.8 Flash with automated compliance scanning and 3 hook variations.
+            Automated compliance scanning, platform character limits, and 3 hook variations.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
           {generationSource && (
-            <span className="text-[11px] font-mono text-zinc-400 bg-zinc-950 px-2.5 py-1 rounded-md border border-zinc-800">
-              Engine: {generationSource === 'gemini-3.8-flash' ? 'Gemini 3.8 Flash' : 'Local Deterministic'}
+            <span
+              className={`text-[11px] font-mono px-2.5 py-1 rounded-md border ${
+                isFallback
+                  ? 'bg-amber-950/40 text-amber-300 border-amber-800/80'
+                  : 'bg-emerald-950/40 text-emerald-300 border-emerald-800/80'
+              }`}
+            >
+              Engine: {isFallback ? 'Local Fallback' : generationSource}
             </span>
           )}
         </div>
@@ -427,6 +437,17 @@ export const ContentStudioView: React.FC = () => {
             </div>
           ) : (
             <div className="space-y-4">
+              {/* Fallback Notice Banner */}
+              {isFallback && generationNote && (
+                <div className="p-3 bg-amber-950/40 border border-amber-900/60 rounded-xl text-xs text-amber-300 flex items-start gap-2.5">
+                  <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <span className="font-semibold text-amber-200">Local Deterministic Engine Engaged</span>
+                    <p className="text-[11px] text-amber-300/90 leading-relaxed">{generationNote}</p>
+                  </div>
+                </div>
+              )}
+
               {/* Hook Variations Selector (Master Spec Requirement) */}
               <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-3">
                 <div className="flex items-center justify-between">

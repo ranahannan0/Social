@@ -6,14 +6,12 @@ import {
   Cpu,
   Database,
   RefreshCw,
-  CheckCircle2,
-  AlertTriangle,
   RotateCcw,
-  ShieldAlert,
   Server,
-  Zap,
   Check,
   FileCode,
+  Clock,
+  AlertCircle,
 } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
@@ -21,7 +19,6 @@ export const SettingsView: React.FC = () => {
 
   const [aiStatus, setAiStatus] = useState<AiStatusResponse | null>(null);
   const [isCheckingAi, setIsCheckingAi] = useState(false);
-  const [aiCheckError, setAiCheckError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [resetSuccess, setResetSuccess] = useState(false);
 
@@ -30,12 +27,17 @@ export const SettingsView: React.FC = () => {
 
   const checkAiHealth = async () => {
     setIsCheckingAi(true);
-    setAiCheckError(null);
     try {
       const res = await apiService.getAiStatus();
       setAiStatus(res);
     } catch (err: any) {
-      setAiCheckError(err.message || 'Failed to ping AI status endpoint');
+      setAiStatus({
+        connected: false,
+        message: err.message || 'Failed to ping AI status endpoint',
+        model: 'gemini-3.8-flash',
+        testedAt: new Date().toISOString(),
+        latencyMs: null,
+      });
     } finally {
       setIsCheckingAi(false);
     }
@@ -222,7 +224,7 @@ export const SettingsView: React.FC = () => {
                     Auto-persist Drafts to Local Storage
                   </span>
                   <span className="text-[11px] text-zinc-500 block">
-                    Keep drafts synchronized between sessions until cloud database integration is active.
+                    Keep drafts synchronized in browser local storage between sessions until backend database integration is implemented.
                   </span>
                 </div>
               </label>
@@ -254,10 +256,10 @@ export const SettingsView: React.FC = () => {
               <div>
                 <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
                   <Cpu className="w-4 h-4 text-emerald-400" />
-                  <span>Gemini 3.8 Flash AI Engine Telemetry</span>
+                  <span>AI Engine Telemetry & Configuration</span>
                 </h3>
                 <p className="text-xs text-zinc-500">
-                  Direct server-side integration via @google/genai TypeScript SDK
+                  Server-side Gemini SDK integration with rate limiting and secure proxy routing
                 </p>
               </div>
 
@@ -267,26 +269,30 @@ export const SettingsView: React.FC = () => {
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-medium border border-zinc-700 transition-colors disabled:opacity-50"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isCheckingAi ? 'animate-spin' : ''}`} />
-                <span>Ping Engine</span>
+                <span>Probe API Connection</span>
               </button>
             </div>
 
-            {/* Health Card */}
+            {/* Live Connection Card */}
             <div className="p-4 bg-zinc-950 border border-zinc-800 rounded-lg space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span
                     className={`w-2.5 h-2.5 rounded-full ${
-                      aiStatus?.connected ? 'bg-emerald-400 shadow-xs shadow-emerald-500/50' : 'bg-amber-400'
+                      aiStatus?.connected
+                        ? 'bg-emerald-400 shadow-xs shadow-emerald-500/50'
+                        : 'bg-amber-400'
                     }`}
                   />
                   <span className="text-xs font-semibold text-zinc-200">
-                    {aiStatus?.connected ? 'Gemini 3.8 Flash Online' : 'Local Deterministic Fallback Active'}
+                    {aiStatus?.connected
+                      ? `${aiStatus.model || 'Gemini'} Connected & Operational`
+                      : 'Local Deterministic Fallback Active'}
                   </span>
                 </div>
-                {aiStatus?.latencyMs !== null && aiStatus?.latencyMs !== undefined && (
+                {aiStatus?.connected && aiStatus?.latencyMs !== null && aiStatus?.latencyMs !== undefined && (
                   <span className="text-[11px] font-mono text-zinc-400">
-                    Latency: {aiStatus.latencyMs}ms
+                    Probe Latency: {aiStatus.latencyMs}ms
                   </span>
                 )}
               </div>
@@ -295,7 +301,7 @@ export const SettingsView: React.FC = () => {
                 {aiStatus?.message || 'Inspecting server API gateway...'}
               </p>
 
-              {aiStatus?.responseSample && (
+              {aiStatus?.connected && aiStatus?.responseSample && (
                 <div className="p-2.5 bg-zinc-900 rounded border border-zinc-800 font-mono text-[11px] text-emerald-300">
                   Engine Probe Echo: {aiStatus.responseSample}
                 </div>
@@ -305,12 +311,14 @@ export const SettingsView: React.FC = () => {
             {/* Technical Configuration Specs */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
               <div className="p-3 bg-zinc-950 rounded-lg border border-zinc-800/80 space-y-1">
-                <span className="text-zinc-500 block">Active AI Model</span>
-                <span className="font-mono text-zinc-200 font-semibold">gemini-3.8-flash</span>
+                <span className="text-zinc-500 block">Configured AI Model</span>
+                <span className="font-mono text-zinc-200 font-semibold">
+                  {aiStatus?.model || 'gemini-3.8-flash'}
+                </span>
               </div>
               <div className="p-3 bg-zinc-950 rounded-lg border border-zinc-800/80 space-y-1">
-                <span className="text-zinc-500 block">Security Architecture</span>
-                <span className="font-mono text-emerald-400 font-semibold">Server-Side Proxy Only</span>
+                <span className="text-zinc-500 block">Rate Limiting</span>
+                <span className="font-mono text-emerald-400 font-semibold">10 req / min per IP</span>
               </div>
               <div className="p-3 bg-zinc-950 rounded-lg border border-zinc-800/80 space-y-1">
                 <span className="text-zinc-500 block">Client Exposure</span>
@@ -321,67 +329,89 @@ export const SettingsView: React.FC = () => {
             <div className="p-3 bg-zinc-950/60 rounded-lg border border-zinc-800/80 text-xs text-zinc-400 space-y-1.5 leading-relaxed">
               <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
                 <Server className="w-3.5 h-3.5 text-emerald-400" />
-                <span>API Key Management</span>
+                <span>Security & API Key Management</span>
               </span>
               <p>
-                As required by AI Studio security rules, the Gemini API key is managed securely in the environment and accessed exclusively on the server (`server.ts`). It is never exposed in client bundles or browser state.
+                The Gemini API key is isolated strictly to the Node.js backend. It is never logged, never returned in API payloads, and never bundled into frontend assets. If the key is not present or upstream service is temporarily unreachable, the Studio automatically utilizes a deterministic template engine.
               </p>
             </div>
           </div>
         </div>
       )}
 
-      {/* Tab 3: Supabase Architecture Readiness */}
+      {/* Tab 3: Supabase Architecture (Task 6: Clearly labeled as Planned, NOT connected) */}
       {activeTab === 'supabase' && (
         <div className="space-y-6">
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
-            <div className="border-b border-zinc-800 pb-3">
-              <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                <Database className="w-4 h-4 text-emerald-400" />
-                <span>Future Supabase Integration Readiness (Phase 2+)</span>
-              </h3>
-              <p className="text-xs text-zinc-500">
-                Phase 1 uses local state persistence, structured identically to the master PostgreSQL schema for seamless Phase 2 migration.
-              </p>
+            <div className="border-b border-zinc-800 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                  <Database className="w-4 h-4 text-zinc-400" />
+                  <span>Planned Supabase Architecture (Phase 2+)</span>
+                </h3>
+                <p className="text-xs text-zinc-500">
+                  Target schema specifications for upcoming multi-tenant database integration.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 text-[11px] font-semibold font-mono rounded-md bg-zinc-800 text-zinc-400 border border-zinc-700">
+                  STATUS: NOT CONNECTED
+                </span>
+                <span className="px-2.5 py-1 text-[11px] font-mono rounded-md bg-zinc-950 text-zinc-400 border border-zinc-800">
+                  Active Storage: LocalStorage (Phase 1)
+                </span>
+              </div>
             </div>
 
-            {/* Readiness Checklist */}
+            {/* Architecture Notice */}
+            <div className="p-3.5 bg-zinc-950 border border-zinc-800/80 rounded-lg text-xs text-zinc-400 flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-zinc-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <span className="font-semibold text-zinc-300 block">Planned Architecture Specification</span>
+                <p>
+                  Supabase integration is not implemented in Phase 1. Current brand profiles, drafts, and calendar events are stored locally in the browser. The database schema below is prepared for Phase 2 implementation.
+                </p>
+              </div>
+            </div>
+
+            {/* Roadmap Modules */}
             <div className="space-y-2">
-              <h4 className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">
-                Migration Readiness Checklist
+              <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+                Planned Phase 2 Database Modules
               </h4>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-300">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>TypeScript interfaces align with Postgres tables</span>
+                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-400">
+                  <Clock className="w-4 h-4 text-zinc-500 shrink-0" />
+                  <span>PostgreSQL Cloud Database (Planned · Phase 2)</span>
                 </div>
-                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-300">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>UUID id conventions preserved throughout drafts</span>
+                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-400">
+                  <Clock className="w-4 h-4 text-zinc-500 shrink-0" />
+                  <span>pgvector Brand Voice Embeddings (Planned · Phase 2)</span>
                 </div>
-                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-300">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>JSONB payload compatibility for hook variations</span>
+                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-400">
+                  <Clock className="w-4 h-4 text-zinc-500 shrink-0" />
+                  <span>Row-Level Security Multi-Tenant Auth (Planned · Phase 2)</span>
                 </div>
-                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-300">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>Compliance audit log columns modeled</span>
+                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-400">
+                  <Clock className="w-4 h-4 text-zinc-500 shrink-0" />
+                  <span>Persistent Compliance Audit Logging (Planned · Phase 2)</span>
                 </div>
               </div>
             </div>
 
-            {/* SQL Schema Preview from Appendix */}
+            {/* SQL Schema Reference */}
             <div className="space-y-2 pt-2">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
                   <FileCode className="w-3.5 h-3.5 text-zinc-400" />
-                  <span>Target PostgreSQL Schema (from Omni Channel Plus Appendix)</span>
+                  <span>Reference PostgreSQL DDL Schema (from Spec Appendix)</span>
                 </span>
-                <span className="text-[10px] font-mono text-zinc-500">pgvector ready</span>
+                <span className="text-[10px] font-mono text-zinc-500">Unexecuted Spec Reference</span>
               </div>
 
-              <pre className="p-3.5 bg-zinc-950 rounded-lg border border-zinc-800 font-mono text-[11px] text-zinc-300 overflow-x-auto leading-relaxed">
-{`-- Brand Voice Memory Schema (Supabase)
+              <pre className="p-3.5 bg-zinc-950 rounded-lg border border-zinc-800 font-mono text-[11px] text-zinc-400 overflow-x-auto leading-relaxed">
+{`-- Brand Voice Memory Schema (Planned for Phase 2 Supabase Integration)
 CREATE TABLE brand_voice_samples (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   content TEXT NOT NULL,
