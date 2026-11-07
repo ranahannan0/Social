@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import { resolveTrustProxyHops } from './src/utils/proxy';
 
 dotenv.config();
 
@@ -14,20 +15,86 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = process.env.PORT || 3000;
+const isDev = process.env.NODE_ENV !== 'production';
+
+// Detect if running inside Google AI Studio preview or standalone production
+const isAiStudioPreview = Boolean(
+  process.env.APP_URL?.includes('run.app') ||
+  process.env.AI_STUDIO ||
+  process.env.ALLOW_AI_STUDIO_IFRAME === 'true'
+);
 
 // Security: Disable Express fingerprinting
 app.disable('x-powered-by');
 
-// Security: Configure trust proxy for Cloud Run and reverse-proxy deployment environments
-app.set('trust proxy', 1);
+/**
+ * Trust Proxy Configuration: TRUST_PROXY_HOPS
+ *
+ * Strict hop-count controlled proxy trust to ensure IP-based rate limiting cannot be spoofed.
+ *
+ * Requirements:
+ * - Default to 0 (no trusted proxy: client IP resolved from socket directly).
+ * - Never use 'trust proxy = true' globally (which would trust arbitrary client-supplied headers).
+ * - Do not hardcode 1 without verifying deployment topology.
+ * - Accept an environment-controlled numeric hop count (TRUST_PROXY_HOPS).
+ * - Prevent spoofed X-Forwarded-For headers from bypassing IP-based rate limiting.
+ *
+ * Topology Reference:
+ * - 0 hops (default): Directly exposed Node.js or local dev. No reverse proxy trusted.
+ * - 1 hop: Single reverse proxy (e.g., standard Google Cloud Run, AWS ALB, Nginx).
+ * - 2 hops: Two reverse proxies (e.g., Cloudflare CDN -> Cloud Run -> Node.js).
+ * - N hops: N chained reverse proxies.
+ */
+function configureTrustProxy(appInstance: express.Express): number {
+  // Primary setting is TRUST_PROXY_HOPS; fallback to TRUST_PROXY if numeric
+  const envVal = process.env.TRUST_PROXY_HOPS || process.env.TRUST_PROXY;
+  const hops = resolveTrustProxyHops(envVal);
 
-// Security: Apply security headers via helmet
-// Allow iframe embedding in Google AI Studio and Vite inline scripts in dev
+  if (hops > 0) {
+    appInstance.set('trust proxy', hops);
+  } else {
+    // 0 hops: explicitly disable proxy trust
+    appInstance.set('trust proxy', false);
+  }
+
+  return hops;
+}
+
+const configuredTrustProxyHops = configureTrustProxy(app);
+
+/**
+ * Security Headers (Section 2)
+ *
+ * - In Development: CSP and frameguard are relaxed to prevent breaking Vite SPA
+ *   dynamic imports, module scripts, eval tooling, and AI Studio development iframe.
+ * - In Production: Strict Content Security Policy (CSP) is enforced.
+ * - Clickjacking Protection: Standalone production uses X-Frame-Options: SAMEORIGIN.
+ *   In Google AI Studio preview, CSP frame-ancestors limits framing strictly to
+ *   Google AI Studio domains and self, preventing arbitrary 3rd-party framing.
+ */
 app.use(
   helmet({
-    contentSecurityPolicy: false,
+    contentSecurityPolicy: isDev
+      ? false
+      : {
+          directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", "'unsafe-inline'"],
+            styleSrc: ["'self'", "'unsafe-inline'"],
+            imgSrc: ["'self'", 'data:', 'https:'],
+            fontSrc: ["'self'", 'data:'],
+            connectSrc: ["'self'"],
+            frameAncestors: isAiStudioPreview
+              ? ["'self'", 'https://aistudio.google.com', 'https://*.google.com', 'https://*.run.app']
+              : ["'self'"],
+          },
+        },
+    frameguard: isDev
+      ? false
+      : isAiStudioPreview
+      ? false // In AI Studio preview, CSP frame-ancestors enforces legitimate Google iframe embedding
+      : { action: 'sameorigin' }, // Standalone production clickjacking defense
     crossOriginEmbedderPolicy: false,
-    frameguard: false, // Required for AI Studio iframe preview
     xContentTypeOptions: true,
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   })
@@ -37,7 +104,21 @@ app.use(
 app.use(express.json({ limit: '64kb' }));
 
 // Environment configuration
-const configuredModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+function resolveModelName(): string {
+  const envModel = process.env.GEMINI_MODEL?.trim();
+  // Ensure GEMINI_MODEL is a valid model identifier and not an accidental credential leak
+  if (
+    envModel &&
+    !envModel.startsWith('AQ.') &&
+    !envModel.startsWith('AIza') &&
+    envModel.length < 50
+  ) {
+    return envModel;
+  }
+  return 'gemini-3.8-flash';
+}
+
+const configuredModel = resolveModelName();
 const rawApiKey = (process.env.GEMINI_API_KEY || '').trim();
 
 // Treat empty string or default example placeholder as unconfigured
@@ -128,6 +209,26 @@ const PLATFORM_LIMITS: Record<string, { maxChars: number; defaultHashtags: numbe
   blog_seo: { maxChars: 25000, defaultHashtags: 0 },
 };
 
+/**
+ * RATE LIMITER SCALABILITY ARCHITECTURE NOTE (Section 5):
+ *
+ * The current rate limiters (for /api/generate and /api/ai-status) utilize express-rate-limit's
+ * default in-memory MemoryStore.
+ *
+ * Operational Characteristics & Multi-Instance Limitations:
+ * 1. Single-Instance / Local / AI Studio Container: MemoryStore is lightweight, has zero external
+ *    network/database dependencies, and accurately limits requests per IP.
+ * 2. Multi-Instance Deployments (e.g. horizontally auto-scaled Cloud Run instances, multi-pod Kubernetes):
+ *    In-memory stores do NOT share state across instances. If N instances are running behind a round-robin
+ *    load balancer, an IP could theoretically submit up to N * max requests across different instances
+ *    unless sticky sessions or centralized storage is used.
+ * 3. Future Scalability Migration (Phase 2):
+ *    When Redis is provisioned as specified in the Phase 2 master architecture (for BullMQ queues and schedulers),
+ *    express-rate-limit should be upgraded to use 'rate-limit-redis' store backed by the Redis cluster.
+ *    Per engineering instructions, Redis is not added in Phase 1 to avoid unnecessary overhead before
+ *    the distributed queue layer is implemented.
+ */
+
 // Rate limiter: 10 generation requests per minute per IP
 const generateRateLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
@@ -141,6 +242,37 @@ const generateRateLimiter = rateLimit({
     });
   },
 });
+
+// Rate limiter: 15 AI status probe requests per minute per IP (Section 1)
+const aiStatusRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req: Request, res: Response) => {
+    res.status(429).json({
+      connected: false,
+      error: 'Rate limit exceeded for AI status probes. Maximum 15 requests per minute allowed.',
+      retryAfterSeconds: 60,
+    });
+  },
+});
+
+// Cache for AI status probe results (60 seconds TTL) (Section 1)
+interface CachedAiStatus {
+  timestamp: number;
+  data: {
+    connected: boolean;
+    message: string;
+    model: string;
+    testedAt: string;
+    latencyMs: number | null;
+    responseSample?: string;
+  };
+}
+
+let cachedAiStatus: CachedAiStatus | null = null;
+const PROBE_CACHE_TTL_MS = 60 * 1000; // 60 seconds
 
 // Helper with timeout to prevent hanging if external connection experiences latency
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMsg: string): Promise<T> {
@@ -156,21 +288,34 @@ interface ValidationErrorDetail {
   message: string;
 }
 
-// Middleware: Strict request body validation for /api/generate
+/**
+ * Strict Request Body Validation Middleware for /api/generate (Section 4)
+ *
+ * Rules:
+ * - Reject missing or null body.
+ * - Reject null for any supplied field (topic, audience, brandName, customInstructions, platform, language, objective, brandVoice).
+ * - Reject non-string in string fields, oversized strings, and non-plain-object in object fields.
+ * - Strictly validate arrays and reject null items.
+ * - Halts request with HTTP 400 and structured validation errors; never triggers fallback generator for invalid input.
+ */
 function validateGenerateRequest(req: Request, res: Response, next: NextFunction) {
   const errors: ValidationErrorDetail[] = [];
   const body = req.body;
 
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return res.status(400).json({
-      error: 'Invalid request payload: expected JSON object.',
-      validationErrors: [{ field: 'body', message: 'Request body must be a JSON object' }],
+      error: 'Invalid request payload: expected non-null JSON object.',
+      validationErrors: [{ field: 'body', message: 'Request body must be a non-null JSON object' }],
     });
   }
 
-  // 1. Topic validation (required, string, 1-300 chars)
-  if (typeof body.topic !== 'string') {
-    errors.push({ field: 'topic', message: 'Topic is required and must be a string' });
+  // 1. Topic validation (required, non-null string, 1-300 chars)
+  if (!('topic' in body) || body.topic === undefined) {
+    errors.push({ field: 'topic', message: 'Topic is required' });
+  } else if (body.topic === null) {
+    errors.push({ field: 'topic', message: 'Topic cannot be null' });
+  } else if (typeof body.topic !== 'string') {
+    errors.push({ field: 'topic', message: 'Topic must be a string' });
   } else {
     const trimmed = body.topic.trim();
     if (trimmed.length === 0) {
@@ -180,36 +325,44 @@ function validateGenerateRequest(req: Request, res: Response, next: NextFunction
     }
   }
 
-  // 2. Audience validation (optional string, max 300 chars)
-  if (body.audience !== undefined && body.audience !== null) {
-    if (typeof body.audience !== 'string') {
+  // 2. Audience validation (optional string, if present cannot be null, max 300 chars)
+  if ('audience' in body && body.audience !== undefined) {
+    if (body.audience === null) {
+      errors.push({ field: 'audience', message: 'Audience cannot be null' });
+    } else if (typeof body.audience !== 'string') {
       errors.push({ field: 'audience', message: 'Audience must be a string' });
     } else if (body.audience.length > 300) {
       errors.push({ field: 'audience', message: 'Audience cannot exceed 300 characters' });
     }
   }
 
-  // 3. Brand name validation (optional string, max 100 chars)
-  if (body.brandName !== undefined && body.brandName !== null) {
-    if (typeof body.brandName !== 'string') {
+  // 3. Brand name validation (optional string, if present cannot be null, max 100 chars)
+  if ('brandName' in body && body.brandName !== undefined) {
+    if (body.brandName === null) {
+      errors.push({ field: 'brandName', message: 'Brand name cannot be null' });
+    } else if (typeof body.brandName !== 'string') {
       errors.push({ field: 'brandName', message: 'Brand name must be a string' });
     } else if (body.brandName.length > 100) {
       errors.push({ field: 'brandName', message: 'Brand name cannot exceed 100 characters' });
     }
   }
 
-  // 4. Custom instructions validation (optional string, max 1000 chars)
-  if (body.customInstructions !== undefined && body.customInstructions !== null) {
-    if (typeof body.customInstructions !== 'string') {
+  // 4. Custom instructions validation (optional string, if present cannot be null, max 1000 chars)
+  if ('customInstructions' in body && body.customInstructions !== undefined) {
+    if (body.customInstructions === null) {
+      errors.push({ field: 'customInstructions', message: 'Custom instructions cannot be null' });
+    } else if (typeof body.customInstructions !== 'string') {
       errors.push({ field: 'customInstructions', message: 'Custom instructions must be a string' });
     } else if (body.customInstructions.length > 1000) {
       errors.push({ field: 'customInstructions', message: 'Custom instructions cannot exceed 1000 characters' });
     }
   }
 
-  // 5. Platform validation (must be in SUPPORTED_PLATFORMS)
-  if (body.platform !== undefined && body.platform !== null) {
-    if (typeof body.platform !== 'string' || !SUPPORTED_PLATFORMS.includes(body.platform as any)) {
+  // 5. Platform validation (optional, if present cannot be null, must be in SUPPORTED_PLATFORMS)
+  if ('platform' in body && body.platform !== undefined) {
+    if (body.platform === null) {
+      errors.push({ field: 'platform', message: 'Platform cannot be null' });
+    } else if (typeof body.platform !== 'string' || !SUPPORTED_PLATFORMS.includes(body.platform as any)) {
       errors.push({
         field: 'platform',
         message: `Platform must be one of: ${SUPPORTED_PLATFORMS.join(', ')}`,
@@ -217,9 +370,11 @@ function validateGenerateRequest(req: Request, res: Response, next: NextFunction
     }
   }
 
-  // 6. Language validation (must be in SUPPORTED_LANGUAGES)
-  if (body.language !== undefined && body.language !== null) {
-    if (typeof body.language !== 'string' || !SUPPORTED_LANGUAGES.includes(body.language as any)) {
+  // 6. Language validation (optional, if present cannot be null, must be in SUPPORTED_LANGUAGES)
+  if ('language' in body && body.language !== undefined) {
+    if (body.language === null) {
+      errors.push({ field: 'language', message: 'Language cannot be null' });
+    } else if (typeof body.language !== 'string' || !SUPPORTED_LANGUAGES.includes(body.language as any)) {
       errors.push({
         field: 'language',
         message: `Language must be one of: ${SUPPORTED_LANGUAGES.join(', ')}`,
@@ -227,9 +382,11 @@ function validateGenerateRequest(req: Request, res: Response, next: NextFunction
     }
   }
 
-  // 7. Objective validation (must be in SUPPORTED_OBJECTIVES)
-  if (body.objective !== undefined && body.objective !== null) {
-    if (typeof body.objective !== 'string' || !SUPPORTED_OBJECTIVES.includes(body.objective as any)) {
+  // 7. Objective validation (optional, if present cannot be null, must be in SUPPORTED_OBJECTIVES)
+  if ('objective' in body && body.objective !== undefined) {
+    if (body.objective === null) {
+      errors.push({ field: 'objective', message: 'Marketing objective cannot be null' });
+    } else if (typeof body.objective !== 'string' || !SUPPORTED_OBJECTIVES.includes(body.objective as any)) {
       errors.push({
         field: 'objective',
         message: `Marketing objective must be one of: ${SUPPORTED_OBJECTIVES.join(', ')}`,
@@ -237,38 +394,46 @@ function validateGenerateRequest(req: Request, res: Response, next: NextFunction
     }
   }
 
-  // 8. Brand voice validation (optional object)
-  if (body.brandVoice !== undefined && body.brandVoice !== null) {
-    if (typeof body.brandVoice !== 'object' || Array.isArray(body.brandVoice)) {
-      errors.push({ field: 'brandVoice', message: 'Brand voice must be a JSON object' });
+  // 8. Brand voice validation (optional, if present cannot be null, must be a non-null plain object)
+  if ('brandVoice' in body && body.brandVoice !== undefined) {
+    if (body.brandVoice === null) {
+      errors.push({ field: 'brandVoice', message: 'Brand voice cannot be null' });
+    } else if (typeof body.brandVoice !== 'object' || Array.isArray(body.brandVoice)) {
+      errors.push({ field: 'brandVoice', message: 'Brand voice must be a non-null plain object' });
     } else {
-      if (body.brandVoice.tone !== undefined && body.brandVoice.tone !== null) {
-        if (typeof body.brandVoice.tone !== 'string') {
+      if ('tone' in body.brandVoice && body.brandVoice.tone !== undefined) {
+        if (body.brandVoice.tone === null) {
+          errors.push({ field: 'brandVoice.tone', message: 'Brand voice tone cannot be null' });
+        } else if (typeof body.brandVoice.tone !== 'string') {
           errors.push({ field: 'brandVoice.tone', message: 'Brand voice tone must be a string' });
         } else if (body.brandVoice.tone.length > 300) {
           errors.push({ field: 'brandVoice.tone', message: 'Brand voice tone cannot exceed 300 characters' });
         }
       }
 
-      if (body.brandVoice.styleGuidelines !== undefined && body.brandVoice.styleGuidelines !== null) {
-        if (typeof body.brandVoice.styleGuidelines !== 'string') {
+      if ('styleGuidelines' in body.brandVoice && body.brandVoice.styleGuidelines !== undefined) {
+        if (body.brandVoice.styleGuidelines === null) {
+          errors.push({ field: 'brandVoice.styleGuidelines', message: 'Style guidelines cannot be null' });
+        } else if (typeof body.brandVoice.styleGuidelines !== 'string') {
           errors.push({ field: 'brandVoice.styleGuidelines', message: 'Style guidelines must be a string' });
         } else if (body.brandVoice.styleGuidelines.length > 500) {
           errors.push({ field: 'brandVoice.styleGuidelines', message: 'Style guidelines cannot exceed 500 characters' });
         }
       }
 
-      if (body.brandVoice.bannedWords !== undefined && body.brandVoice.bannedWords !== null) {
-        if (!Array.isArray(body.brandVoice.bannedWords)) {
-          errors.push({ field: 'brandVoice.bannedWords', message: 'Banned words must be an array of strings' });
+      if ('bannedWords' in body.brandVoice && body.brandVoice.bannedWords !== undefined) {
+        if (body.brandVoice.bannedWords === null) {
+          errors.push({ field: 'brandVoice.bannedWords', message: 'Banned words cannot be null' });
+        } else if (!Array.isArray(body.brandVoice.bannedWords)) {
+          errors.push({ field: 'brandVoice.bannedWords', message: 'Banned words must be an array' });
         } else {
           if (body.brandVoice.bannedWords.length > 50) {
             errors.push({ field: 'brandVoice.bannedWords', message: 'Banned words array cannot exceed 50 items' });
           }
           for (let i = 0; i < body.brandVoice.bannedWords.length; i++) {
             const word = body.brandVoice.bannedWords[i];
-            if (typeof word !== 'string') {
-              errors.push({ field: `brandVoice.bannedWords[${i}]`, message: 'Every banned word must be a string' });
+            if (word === null || word === undefined || typeof word !== 'string') {
+              errors.push({ field: `brandVoice.bannedWords[${i}]`, message: 'Every banned word must be a non-null string' });
               break;
             } else if (word.length > 50) {
               errors.push({ field: `brandVoice.bannedWords[${i}]`, message: 'Banned word entry cannot exceed 50 characters' });
@@ -290,7 +455,7 @@ function validateGenerateRequest(req: Request, res: Response, next: NextFunction
   next();
 }
 
-// API: Health check (Task 4: accurate status, configurable model, supabaseReady=false)
+// API: Health check
 app.get('/api/health', (req: Request, res: Response) => {
   res.json({
     status: 'ok',
@@ -300,19 +465,31 @@ app.get('/api/health', (req: Request, res: Response) => {
     version: '2.0-phase1',
     storageMode: 'localStorage_demo',
     supabaseReady: false,
+    trustProxyHops: configuredTrustProxyHops,
   });
 });
 
-// API: AI Status probe for Settings view (Task 4: accurate live probe, no false positives)
-app.get('/api/ai-status', async (req: Request, res: Response) => {
+// API: AI Status probe for Settings view (with 15 req/min rate limit and 60-second caching)
+app.get('/api/ai-status', aiStatusRateLimiter, async (req: Request, res: Response) => {
+  // Return cached probe result if within 60-second TTL
+  const now = Date.now();
+  if (cachedAiStatus && (now - cachedAiStatus.timestamp < PROBE_CACHE_TTL_MS)) {
+    return res.json(cachedAiStatus.data);
+  }
+
   if (!isKeyConfigured || !ai) {
-    return res.json({
+    const unconfiguredResult = {
       connected: false,
       message: 'GEMINI_API_KEY is not configured or contains placeholder value. Content Studio uses local deterministic fallback.',
       model: configuredModel,
       testedAt: new Date().toISOString(),
       latencyMs: null,
-    });
+    };
+    cachedAiStatus = {
+      timestamp: now,
+      data: unconfiguredResult,
+    };
+    return res.json(unconfiguredResult);
   }
 
   const start = Date.now();
@@ -326,29 +503,46 @@ app.get('/api/ai-status', async (req: Request, res: Response) => {
       'Gemini probe timed out after 8000ms'
     );
     const latency = Date.now() - start;
-    return res.json({
+
+    const freshResult = {
       connected: true,
       message: `${configuredModel} operational and ready.`,
       model: configuredModel,
       testedAt: new Date().toISOString(),
       latencyMs: latency,
       responseSample: testRes.text?.trim(),
-    });
+    };
+
+    // Cache successful probe result
+    cachedAiStatus = {
+      timestamp: Date.now(),
+      data: freshResult,
+    };
+
+    return res.json(freshResult);
   } catch (error: any) {
     const sanitizedError = error instanceof Error ? error.message : 'Unknown provider error';
     console.error('[AI Status Probe] Failed to probe Gemini API:', sanitizedError);
 
-    return res.json({
+    const failResult = {
       connected: false,
       message: 'Upstream AI model probe failed or timed out. Studio will use safe local fallback.',
       model: configuredModel,
       testedAt: new Date().toISOString(),
       latencyMs: Date.now() - start,
-    });
+    };
+
+    // Cache probe result for 60-second TTL to prevent repeated quota consumption
+    cachedAiStatus = {
+      timestamp: Date.now(),
+      data: failResult,
+    };
+
+    return res.json(failResult);
   }
 });
 
-// API: Hardened Content Generation Endpoint (Tasks 1, 2, 3)
+// API: Hardened Content Generation Endpoint
 app.post(
   '/api/generate',
   generateRateLimiter,
@@ -574,8 +768,6 @@ function generateIntelligentFallback(params: {
 
 // Setup Vite middleware in dev or static files in production
 async function startServer() {
-  const isDev = process.env.NODE_ENV !== 'production';
-
   if (isDev) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
