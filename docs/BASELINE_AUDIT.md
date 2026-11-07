@@ -154,3 +154,11 @@ MemoryStore rate limits, single process, no DB, no queues, no CDN consideration,
 ## 14. Recommendation
 
 Phase 1 exit is achievable in this branch. **Phase 2 (Supabase database + auth) is the correct next phase** once the Phase 1 verification checklist below passes. The first Phase 2 deliverable presented for review must be the multi-tenant schema (profiles / organizations / organization_members / brands / drafts / calendar_events / compliance_checks …) with RLS policies and the localStorage export/migration plan — design before SQL, per the master development order.
+
+---
+
+## 15. Post-Audit Update (2026-11-08, commit 2ecc9b4)
+
+- Phase 1 remediation was executed on this branch (commits 90fddec, d5e0913, eee21bc) and **verified**: `tsc --noEmit` clean, production build OK, 25/25 unit + 20/20 integration tests pass (isolated server, `GEMINI_API_KEY` stripped — no paid API calls).
+- Upstream independently pushed commit `a8c68ed` fixing overlapping issues (B-1, D-1, partial B-2). It was **merged** (2ecc9b4) keeping the superset implementation; upstream's two regression tests (8f-2, 8h) were retained and now pass. Upstream-only items that remain addressed solely by this branch: B-2 week/day cell keys, B-3 dynamic seeds, B-4 ScheduleModal default, D-2, D-3, D-5, D-6.
+- Phase 1 exit criteria: **all met**. Phase 2 schema design proposal published at `docs/PHASE2_SCHEMA_DESIGN.md` (design before SQL).
