@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Calendar, Clock, X, Check } from 'lucide-react';
 import { ContentDraft } from '../../types';
 import { useApp } from '../../context/AppContext';
+import { addDays, toLocalDateKey } from '../../utils/dateUtils';
 
 interface ScheduleModalProps {
   draft: ContentDraft;
@@ -18,10 +19,11 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({
 }) => {
   const { scheduleDraft } = useApp();
 
-  // Tomorrow as default date
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const defaultDateStr = tomorrow.toISOString().split('T')[0];
+  // Tomorrow as default date — computed in LOCAL calendar terms.
+  // toISOString() would return the UTC date, which between 00:00 and 04:59
+  // in UTC+ timezones (e.g. Asia/Karachi) yields TODAY instead of tomorrow
+  // (audit item B-4).
+  const defaultDateStr = toLocalDateKey(addDays(new Date(), 1));
 
   const [date, setDate] = useState(draft.scheduledDate ? draft.scheduledDate.split('T')[0] : defaultDateStr);
   const [time, setTime] = useState(draft.scheduledDate && draft.scheduledDate.includes('T') ? draft.scheduledDate.split('T')[1].slice(0, 5) : '10:00');

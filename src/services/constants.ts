@@ -1,4 +1,5 @@
 import { BrandProfile, ContentDraft, CalendarEvent, PlatformMetadata } from '../types';
+import { addDays, formatEventStamp, toLocalDateKey } from '../utils/dateUtils';
 
 export const BANNED_AI_FLUFF_PHRASES: string[] = [
   "in today's fast-paced world",
@@ -114,199 +115,230 @@ export const PLATFORMS_CONFIG: Record<string, PlatformMetadata> = {
   },
 };
 
-export const INITIAL_BRANDS: BrandProfile[] = [
-  {
-    id: 'brand-01',
-    name: 'Apex Cloud Systems',
-    tagline: 'High-throughput enterprise infrastructure without DevOps sprawl',
-    industry: 'Enterprise B2B SaaS',
-    website: 'https://apexcloud.io',
-    targetAudience: 'CTOs, VP of Engineering, Senior DevOps Leads managing multi-cloud Kubernetes clusters.',
-    brandVoice: {
-      tone: 'Direct, engineering-led, concise, zero marketing fluff, metrics-driven.',
-      bannedWords: ['synergy', 'game-changing', 'disruptive', 'revolutionary', 'best-of-breed'],
-      styleGuidelines: 'Open with the technical bottleneck or architectural trade-off. Back assertions with latency numbers or cost reductions.',
-      sampleCopy: 'Most multi-tenant clusters waste 34% of memory on idle reserve pools. Here is how we compressed worker node overhead without pod evictions.',
-    },
-    preferredLanguage: 'English',
-    productsAndServices: [
-      { id: 'prod-1', name: 'Apex Orchestrator', description: 'Autonomous Kubernetes cluster optimization', tierOrPrice: 'Enterprise SLA' },
-      { id: 'prod-2', name: 'CloudFin Sentinel', description: 'Real-time multi-cloud billing anomaly detector', tierOrPrice: '$499/mo' },
-    ],
-    createdAt: '2026-10-15T10:00:00Z',
-    updatedAt: '2026-11-01T12:00:00Z',
-  },
-  {
-    id: 'brand-02',
-    name: 'Aura Botanica',
-    tagline: 'Clean herbal wellness formulated for urban lifestyles',
-    industry: 'Consumer Wellness / E-Commerce',
-    website: 'https://aurabotanica.pk',
-    targetAudience: 'Health-conscious professionals aged 24-42 across South Asia and global diaspora.',
-    brandVoice: {
-      tone: 'Warm, reassuring, evidence-based herbal science, conversational Roman Urdu & English.',
-      bannedWords: ['miracle cure', 'overnight magic', 'secret trick', 'toxins flushed'],
-      styleGuidelines: 'Never make diagnostic claims. Highlight natural extraction and clean lab certifications.',
-      sampleCopy: 'Rozana ki routine mein stress aur pollution se bal aur skin par asar parhta hai. Simple, lab-tested herbal care se consistency maintain karein.',
-    },
-    preferredLanguage: 'Roman Urdu',
-    productsAndServices: [
-      { id: 'prod-3', name: 'Ashwagandha Calm Elixir', description: 'Cold-pressed organic adaptogen drops', tierOrPrice: 'Rs. 2,850' },
-      { id: 'prod-4', name: 'Pure Moringa Daily Defense', description: 'Micro-ground raw moringa capsules', tierOrPrice: 'Rs. 1,950' },
-    ],
-    createdAt: '2026-10-20T08:30:00Z',
-    updatedAt: '2026-11-04T16:15:00Z',
-  },
-];
+/**
+ * Demo seed data factories (Audit items B-3 / D-4).
+ *
+ * Seed dates are computed RELATIVE TO THE ACTUAL CURRENT DATE at call time, so
+ * the demo calendar always shows upcoming, meaningful dates instead of a
+ * frozen November 2026 snapshot. Each factory rebuilds fresh values; callers
+ * (initial state and "Reset to Demo Data") invoke them per use.
+ *
+ * Local date components are used everywhere (see src/utils/dateUtils.ts) —
+ * never toISOString(), which shifts dates across UTC boundaries.
+ */
 
-export const INITIAL_DRAFTS: ContentDraft[] = [
-  {
-    id: 'draft-101',
-    brandId: 'brand-01',
-    title: 'Kubernetes Memory Overhead Breakdown',
-    topic: 'Cloud resource waste in Kubernetes clusters',
-    platform: 'linkedin',
-    objective: 'Authority',
-    language: 'English',
-    audience: 'Engineering Directors and Platform Architects',
-    selectedHookType: 'patternInterrupt',
-    hooks: {
-      patternInterrupt: 'Most engineering teams spend 40% more on AWS EC2 than their pods actually consume.',
-      curiosityGap: 'There is an overlooked reservation setting in Kubelet that silently doubles your compute bill.',
-      directBenefit: 'Here is how to reduce memory fragmentation by 28% without degrading pod SLA.',
-    },
-    caption: 'Most engineering teams spend 40% more on AWS EC2 than their pods actually consume.\n\nWhen we analyzed 120 production clusters last month, the culprit was rarely runaway application code.\n\nIt came down to 3 configuration traps:\n\n1. Over-provisioned memory requests that prevent node bin-packing.\n2. Inappropriate Horizontal Pod Autoscaling thresholds triggering thrashing.\n3. Blindly accepting cloud provider default node sizes without profiling CPU:RAM ratios.\n\nFixing just the memory limit buffer reclaimed an average of $4,200 per cluster per month.\n\nHow often does your platform team audit container reservation buffers?',
-    callToAction: 'Comment below or reach out to see the benchmark script.',
-    hashtags: ['DevOps', 'Kubernetes', 'CloudOptimization', 'SRE'],
-    visualDirection: 'Clean terminal screenshot comparing memory allocation before vs after node bin-packing.',
-    keyTakeaways: [
-      'Over-provisioned request buffers cause massive idle spend',
-      'HPA thrashing creates unnecessary cloud node spin-ups',
-      'Systematic profiling pays back in days'
-    ],
-    status: 'ready',
-    complianceStatus: {
-      passed: true,
-      detectedFluff: [],
-      charCount: 712,
-      maxLimit: 3000,
-      warnings: [],
-    },
-    createdAt: '2026-11-05T09:15:00Z',
-    updatedAt: '2026-11-05T10:30:00Z',
-  },
-  {
-    id: 'draft-102',
-    brandId: 'brand-02',
-    title: 'Ashwagandha Routine in Roman Urdu',
-    topic: 'Daily herbal stress management routine',
-    platform: 'instagram_reels',
-    objective: 'Engagement',
-    language: 'Roman Urdu',
-    audience: 'Urban professionals dealing with screen fatigue',
-    selectedHookType: 'curiosityGap',
-    hooks: {
-      patternInterrupt: 'Har roz 4 cup coffee peene se aapka stress kam nahi ho raha, balkay cortisol barh raha hai.',
-      curiosityGap: 'Aap raat ko sote waqt jo choti ghalti karte hain, woh poore din ki energy ko drain kar deti hai.',
-      directBenefit: 'Yeh simple 2-minute herbal habit aapke sleep cycle ko natural taur par stable kar sakti hai.',
-    },
-    caption: 'Aap raat ko sote waqt jo choti ghalti karte hain, woh poore din ki energy ko drain kar deti hai.\n\nLate night screen scrolling aur irregular meals ke sath body ka cortisol rhythm disturb ho jata hai.\n\nAura Botanica ka Ashwagandha Calm Elixir warm milk ya paani ke sath lene se body naturally relax hoti hai.\n\n- Zero artificial preservatives\n- Lab-tested purity\n- Natural adaptogenic balance\n\nApne daily evening routine ko calm banayein.',
-    callToAction: 'Order karne ke liye bio mein link par click karein.',
-    hashtags: ['AuraBotanica', 'HerbalWellness', 'CleanLiving', 'HealthyHabits'],
-    visualDirection: 'Vertical 9:16 warm amber ambient lighting, close-up of amber glass dropper into ceramic cup with soft natural sound design.',
-    keyTakeaways: [
-      'Target natural cortisol stabilization',
-      'Emphasize evening wind-down routine',
-      'Highlight lab purity verification'
-    ],
-    status: 'scheduled',
-    scheduledDate: '2026-11-10T19:00:00',
-    complianceStatus: {
-      passed: true,
-      detectedFluff: [],
-      charCount: 476,
-      maxLimit: 2200,
-      warnings: [],
-    },
-    createdAt: '2026-11-06T14:20:00Z',
-    updatedAt: '2026-11-06T14:45:00Z',
-  },
-  {
-    id: 'draft-103',
-    brandId: 'brand-01',
-    title: 'Cloud Cost Governance Newsletter Issue #42',
-    topic: 'FinOps best practices for multi-tenant SaaS',
-    platform: 'email',
-    objective: 'Lead Gen',
-    language: 'English',
-    audience: 'Tech leaders and finance controllers',
-    selectedHookType: 'directBenefit',
-    hooks: {
-      patternInterrupt: 'Your CFO does not care about pods; they care about cost of goods sold per tenant.',
-      curiosityGap: 'Why unit economics in SaaS look healthy until 5 enterprise customers join.',
-      directBenefit: '3 FinOps rules to maintain 80%+ gross margin as your platform scales.',
-    },
-    caption: 'Subject: The Hidden Cost of "Fast Ship" Infrastructure\n\nHey Team,\n\nSpeed of delivery is the primary metric in early-stage SaaS. But when platform usage quadruples, unchecked cloud infrastructure bills eat into operating cash faster than headcount.\n\nIn this issue:\n- How to calculate real Cost Per Customer (CPC) down to the SQL query.\n- Why tagging policies fail 90% of the time (and what to automate instead).\n- Download our open-source FinOps audit checklist.\n\nRead the full guide on the Apex portal.',
-    callToAction: 'Read the full framework on our technical blog.',
-    hashtags: [],
-    keyTakeaways: [
-      'Translate infrastructure metrics into financial gross margin terms',
-      'Automate allocation tagging at container spin-up time'
-    ],
-    status: 'draft',
-    complianceStatus: {
-      passed: true,
-      detectedFluff: [],
-      charCount: 520,
-      maxLimit: 10000,
-      warnings: [],
-    },
-    createdAt: '2026-11-07T08:00:00Z',
-    updatedAt: '2026-11-07T08:15:00Z',
-  },
-];
+/** ISO timestamp N days ago at a fixed local time (demo audit metadata). */
+function daysAgoIso(days: number, hour: number, minute: number): string {
+  const d = addDays(new Date(), -days);
+  d.setHours(hour, minute, 0, 0);
+  return d.toISOString();
+}
 
-export const INITIAL_CALENDAR_EVENTS: CalendarEvent[] = [
-  {
-    id: 'event-01',
-    draftId: 'draft-102',
-    brandId: 'brand-02',
-    title: 'Ashwagandha Routine Video (Reels)',
-    platform: 'instagram_reels',
-    date: '2026-11-10',
-    time: '19:00',
-    status: 'scheduled',
-    summary: '9:16 Video Reel targeting urban wellness evening habits',
-  },
-  {
-    id: 'event-02',
-    draftId: 'draft-101',
-    brandId: 'brand-01',
-    title: 'Kubernetes Memory Overhead Breakdown',
-    platform: 'linkedin',
-    date: '2026-11-12',
-    time: '09:30',
-    status: 'scheduled',
-    summary: 'Technical teardown of AWS EC2 memory waste in Kubernetes',
-  },
-  {
-    id: 'event-03',
-    brandId: 'brand-01',
-    title: 'Cloud FinOps Weekly Newsletter #42',
-    platform: 'email',
-    date: '2026-11-14',
-    time: '11:00',
-    status: 'draft',
-    summary: 'Weekly email broadcast to engineering directors',
-  },
-  {
-    id: 'event-04',
-    brandId: 'brand-02',
-    title: 'Moringa Superfood Health Tips Carousel',
-    platform: 'instagram_feed',
-    date: '2026-11-16',
-    time: '17:00',
-    status: 'draft',
-    summary: '4-slide carousel on nutrient density of fresh moringa',
-  },
-];
+export function buildInitialBrands(): BrandProfile[] {
+  return [
+    {
+      id: 'brand-01',
+      name: 'Apex Cloud Systems',
+      tagline: 'High-throughput enterprise infrastructure without DevOps sprawl',
+      industry: 'Enterprise B2B SaaS',
+      website: 'https://apexcloud.io',
+      targetAudience: 'CTOs, VP of Engineering, Senior DevOps Leads managing multi-cloud Kubernetes clusters.',
+      brandVoice: {
+        tone: 'Direct, engineering-led, concise, zero marketing fluff, metrics-driven.',
+        bannedWords: ['synergy', 'game-changing', 'disruptive', 'revolutionary', 'best-of-breed'],
+        styleGuidelines: 'Open with the technical bottleneck or architectural trade-off. Back assertions with latency numbers or cost reductions.',
+        sampleCopy: 'Most multi-tenant clusters waste 34% of memory on idle reserve pools. Here is how we compressed worker node overhead without pod evictions.',
+      },
+      preferredLanguage: 'English',
+      productsAndServices: [
+        { id: 'prod-1', name: 'Apex Orchestrator', description: 'Autonomous Kubernetes cluster optimization', tierOrPrice: 'Enterprise SLA' },
+        { id: 'prod-2', name: 'CloudFin Sentinel', description: 'Real-time multi-cloud billing anomaly detector', tierOrPrice: '$499/mo' },
+      ],
+      createdAt: daysAgoIso(24, 10, 0),
+      updatedAt: daysAgoIso(7, 12, 0),
+    },
+    {
+      id: 'brand-02',
+      name: 'Aura Botanica',
+      tagline: 'Clean herbal wellness formulated for urban lifestyles',
+      industry: 'Consumer Wellness / E-Commerce',
+      website: 'https://aurabotanica.pk',
+      targetAudience: 'Health-conscious professionals aged 24-42 across South Asia and global diaspora.',
+      brandVoice: {
+        tone: 'Warm, reassuring, evidence-based herbal science, conversational Roman Urdu & English.',
+        bannedWords: ['miracle cure', 'overnight magic', 'secret trick', 'toxins flushed'],
+        styleGuidelines: 'Never make diagnostic claims. Highlight natural extraction and clean lab certifications.',
+        sampleCopy: 'Rozana ki routine mein stress aur pollution se bal aur skin par asar parhta hai. Simple, lab-tested herbal care se consistency maintain karein.',
+      },
+      preferredLanguage: 'Roman Urdu',
+      productsAndServices: [
+        { id: 'prod-3', name: 'Ashwagandha Calm Elixir', description: 'Cold-pressed organic adaptogen drops', tierOrPrice: 'Rs. 2,850' },
+        { id: 'prod-4', name: 'Pure Moringa Daily Defense', description: 'Micro-ground raw moringa capsules', tierOrPrice: 'Rs. 1,950' },
+      ],
+      createdAt: daysAgoIso(19, 8, 30),
+      updatedAt: daysAgoIso(4, 16, 15),
+    },
+  ];
+}
+
+export function buildInitialDrafts(): ContentDraft[] {
+  // Shared schedule anchors so drafts and calendar events stay consistent
+  // (Audit item D-4: draft state must agree with its linked event).
+  const reelsDate = toLocalDateKey(addDays(new Date(), 2)); // event-01
+  const linkedinDate = toLocalDateKey(addDays(new Date(), 4)); // event-02
+
+  return [
+    {
+      id: 'draft-101',
+      brandId: 'brand-01',
+      title: 'Kubernetes Memory Overhead Breakdown',
+      topic: 'Cloud resource waste in Kubernetes clusters',
+      platform: 'linkedin',
+      objective: 'Authority',
+      language: 'English',
+      audience: 'Engineering Directors and Platform Architects',
+      selectedHookType: 'patternInterrupt',
+      hooks: {
+        patternInterrupt: 'Most engineering teams spend 40% more on AWS EC2 than their pods actually consume.',
+        curiosityGap: 'There is an overlooked reservation setting in Kubelet that silently doubles your compute bill.',
+        directBenefit: 'Here is how to reduce memory fragmentation by 28% without degrading pod SLA.',
+      },
+      caption: 'Most engineering teams spend 40% more on AWS EC2 than their pods actually consume.\n\nWhen we analyzed 120 production clusters last month, the culprit was rarely runaway application code.\n\nIt came down to 3 configuration traps:\n\n1. Over-provisioned memory requests that prevent node bin-packing.\n2. Inappropriate Horizontal Pod Autoscaling thresholds triggering thrashing.\n3. Blindly accepting cloud provider default node sizes without profiling CPU:RAM ratios.\n\nFixing just the memory limit buffer reclaimed an average of $4,200 per cluster per month.\n\nHow often does your platform team audit container reservation buffers?',
+      callToAction: 'Comment below or reach out to see the benchmark script.',
+      hashtags: ['DevOps', 'Kubernetes', 'CloudOptimization', 'SRE'],
+      visualDirection: 'Clean terminal screenshot comparing memory allocation before vs after node bin-packing.',
+      keyTakeaways: [
+        'Over-provisioned request buffers cause massive idle spend',
+        'HPA thrashing creates unnecessary cloud node spin-ups',
+        'Systematic profiling pays back in days'
+      ],
+      status: 'scheduled',
+      scheduledDate: formatEventStamp(linkedinDate, '09:30'),
+      complianceStatus: {
+        passed: true,
+        detectedFluff: [],
+        charCount: 712,
+        maxLimit: 3000,
+        warnings: [],
+      },
+      createdAt: daysAgoIso(3, 9, 15),
+      updatedAt: daysAgoIso(3, 10, 30),
+    },
+    {
+      id: 'draft-102',
+      brandId: 'brand-02',
+      title: 'Ashwagandha Routine in Roman Urdu',
+      topic: 'Daily herbal stress management routine',
+      platform: 'instagram_reels',
+      objective: 'Engagement',
+      language: 'Roman Urdu',
+      audience: 'Urban professionals dealing with screen fatigue',
+      selectedHookType: 'curiosityGap',
+      hooks: {
+        patternInterrupt: 'Har roz 4 cup coffee peene se aapka stress kam nahi ho raha, balkay cortisol barh raha hai.',
+        curiosityGap: 'Aap raat ko sote waqt jo choti ghalti karte hain, woh poore din ki energy ko drain kar deti hai.',
+        directBenefit: 'Yeh simple 2-minute herbal habit aapke sleep cycle ko natural taur par stable kar sakti hai.',
+      },
+      caption: 'Aap raat ko sote waqt jo choti ghalti karte hain, woh poore din ki energy ko drain kar deti hai.\n\nLate night screen scrolling aur irregular meals ke sath body ka cortisol rhythm disturb ho jata hai.\n\nAura Botanica ka Ashwagandha Calm Elixir warm milk ya paani ke sath lene se body naturally relax hoti hai.\n\n- Zero artificial preservatives\n- Lab-tested purity\n- Natural adaptogenic balance\n\nApne daily evening routine ko calm banayein.',
+      callToAction: 'Order karne ke liye bio mein link par click karein.',
+      hashtags: ['AuraBotanica', 'HerbalWellness', 'CleanLiving', 'HealthyHabits'],
+      visualDirection: 'Vertical 9:16 warm amber ambient lighting, close-up of amber glass dropper into ceramic cup with soft natural sound design.',
+      keyTakeaways: [
+        'Target natural cortisol stabilization',
+        'Emphasize evening wind-down routine',
+        'Highlight lab purity verification'
+      ],
+      status: 'scheduled',
+      scheduledDate: formatEventStamp(reelsDate, '19:00'),
+      complianceStatus: {
+        passed: true,
+        detectedFluff: [],
+        charCount: 476,
+        maxLimit: 2200,
+        warnings: [],
+      },
+      createdAt: daysAgoIso(2, 14, 20),
+      updatedAt: daysAgoIso(2, 14, 45),
+    },
+    {
+      id: 'draft-103',
+      brandId: 'brand-01',
+      title: 'Cloud Cost Governance Newsletter Issue #42',
+      topic: 'FinOps best practices for multi-tenant SaaS',
+      platform: 'email',
+      objective: 'Lead Gen',
+      language: 'English',
+      audience: 'Tech leaders and finance controllers',
+      selectedHookType: 'directBenefit',
+      hooks: {
+        patternInterrupt: 'Your CFO does not care about pods; they care about cost of goods sold per tenant.',
+        curiosityGap: 'Why unit economics in SaaS look healthy until 5 enterprise customers join.',
+        directBenefit: '3 FinOps rules to maintain 80%+ gross margin as your platform scales.',
+      },
+      caption: 'Subject: The Hidden Cost of "Fast Ship" Infrastructure\n\nHey Team,\n\nSpeed of delivery is the primary metric in early-stage SaaS. But when platform usage quadruples, unchecked cloud infrastructure bills eat into operating cash faster than headcount.\n\nIn this issue:\n- How to calculate real Cost Per Customer (CPC) down to the SQL query.\n- Why tagging policies fail 90% of the time (and what to automate instead).\n- Download our open-source FinOps audit checklist.\n\nRead the full guide on the Apex portal.',
+      callToAction: 'Read the full framework on our technical blog.',
+      hashtags: [],
+      keyTakeaways: [
+        'Translate infrastructure metrics into financial gross margin terms',
+        'Automate allocation tagging at container spin-up time'
+      ],
+      status: 'draft',
+      complianceStatus: {
+        passed: true,
+        detectedFluff: [],
+        charCount: 520,
+        maxLimit: 10000,
+        warnings: [],
+      },
+      createdAt: daysAgoIso(1, 8, 0),
+      updatedAt: daysAgoIso(1, 8, 15),
+    },
+  ];
+}
+
+export function buildInitialCalendarEvents(): CalendarEvent[] {
+  return [
+    {
+      id: 'event-01',
+      draftId: 'draft-102',
+      brandId: 'brand-02',
+      title: 'Ashwagandha Routine Video (Reels)',
+      platform: 'instagram_reels',
+      date: toLocalDateKey(addDays(new Date(), 2)),
+      time: '19:00',
+      status: 'scheduled',
+      summary: '9:16 Video Reel targeting urban wellness evening habits',
+    },
+    {
+      id: 'event-02',
+      draftId: 'draft-101',
+      brandId: 'brand-01',
+      title: 'Kubernetes Memory Overhead Breakdown',
+      platform: 'linkedin',
+      date: toLocalDateKey(addDays(new Date(), 4)),
+      time: '09:30',
+      status: 'scheduled',
+      summary: 'Technical teardown of AWS EC2 memory waste in Kubernetes',
+    },
+    {
+      id: 'event-03',
+      brandId: 'brand-01',
+      title: 'Cloud FinOps Weekly Newsletter #42',
+      platform: 'email',
+      date: toLocalDateKey(addDays(new Date(), 6)),
+      time: '11:00',
+      status: 'draft',
+      summary: 'Weekly email broadcast to engineering directors',
+    },
+    {
+      id: 'event-04',
+      brandId: 'brand-02',
+      title: 'Moringa Superfood Health Tips Carousel',
+      platform: 'instagram_feed',
+      date: toLocalDateKey(addDays(new Date(), 8)),
+      time: '17:00',
+      status: 'draft',
+      summary: '4-slide carousel on nutrient density of fresh moringa',
+    },
+  ];
+}

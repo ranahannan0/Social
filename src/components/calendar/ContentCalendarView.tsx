@@ -3,6 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { CalendarEvent, PlatformType } from '../../types';
 import { PLATFORMS_CONFIG } from '../../services/constants';
 import { PlatformIcon } from '../common/PlatformIcon';
+import { addDays, toLocalDateKey } from '../../utils/dateUtils';
 import {
   CalendarDays,
   ChevronLeft,
@@ -23,17 +24,19 @@ export const ContentCalendarView: React.FC = () => {
   const { calendarEvents, addCalendarEvent, deleteCalendarEvent, drafts, brands, activeBrandId } = useApp();
 
   const [viewMode, setViewMode] = useState<CalendarViewMode>('month');
-  const [currentDate, setCurrentDate] = useState<Date>(new Date(2026, 10, 7)); // Reference November 2026
+  // Opens on the ACTUAL current date (audit item B-3: was frozen at Nov 2026).
+  const [currentDate, setCurrentDate] = useState<Date>(new Date());
 
   // Selected event modal
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
 
-  // New Event Modal
+  // New Event Modal — default date is tomorrow in LOCAL calendar terms
+  // (never toISOString(), which shifts the day across UTC boundaries).
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [newEvent, setNewEvent] = useState({
     title: '',
     platform: 'linkedin' as PlatformType,
-    date: new Date(2026, 10, 10).toISOString().split('T')[0],
+    date: toLocalDateKey(addDays(new Date(), 1)),
     time: '10:00',
     status: 'scheduled' as 'draft' | 'scheduled',
     summary: '',
@@ -109,7 +112,7 @@ export const ContentCalendarView: React.FC = () => {
     setNewEvent({
       title: '',
       platform: 'linkedin',
-      date: new Date(2026, 10, 10).toISOString().split('T')[0],
+      date: toLocalDateKey(addDays(new Date(), 1)),
       time: '10:00',
       status: 'scheduled',
       summary: '',
@@ -283,7 +286,10 @@ export const ContentCalendarView: React.FC = () => {
               const d = new Date(currentDate);
               const dayOfWeek = d.getDay();
               d.setDate(d.getDate() - dayOfWeek + i);
-              const dateStr = d.toISOString().split('T')[0];
+              // Local date key — NOT toISOString(), which returns the UTC
+              // date and mis-files cells by one day for UTC+ timezones
+              // such as Asia/Karachi (audit item B-2).
+              const dateStr = toLocalDateKey(d);
               const dayEvents = eventsByDate[dateStr] || [];
 
               return (
@@ -343,15 +349,15 @@ export const ContentCalendarView: React.FC = () => {
               <p className="text-xs text-zinc-500">Day timetable and posting queue</p>
             </div>
             <span className="text-xs text-zinc-400 font-mono">
-              {(eventsByDate[currentDate.toISOString().split('T')[0]] || []).length} scheduled
+              {(eventsByDate[toLocalDateKey(currentDate)] || []).length} scheduled
             </span>
           </div>
 
           <div className="space-y-2">
-            {(eventsByDate[currentDate.toISOString().split('T')[0]] || []).length === 0 ? (
+            {(eventsByDate[toLocalDateKey(currentDate)] || []).length === 0 ? (
               <p className="text-xs text-zinc-500 py-8 text-center">No campaigns scheduled for this date.</p>
             ) : (
-              (eventsByDate[currentDate.toISOString().split('T')[0]] || []).map(evt => (
+              (eventsByDate[toLocalDateKey(currentDate)] || []).map(evt => (
                 <div
                   key={evt.id}
                   onClick={() => setSelectedEvent(evt)}

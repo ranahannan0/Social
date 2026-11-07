@@ -7,16 +7,18 @@ import {
   PlatformType,
 } from '../types';
 import {
-  INITIAL_BRANDS,
-  INITIAL_DRAFTS,
-  INITIAL_CALENDAR_EVENTS,
-} from '../services/constants';
-import {
   cascadeDeleteBrand,
   syncDeleteCalendarEvent,
   syncScheduleDraft,
   calculateComplianceStats,
+  recomputeDraftScheduleState,
+  generateEntityId,
 } from '../utils/dataIntegrity';
+import {
+  buildInitialBrands,
+  buildInitialDrafts,
+  buildInitialCalendarEvents,
+} from '../services/constants';
 
 interface AppContextType {
   activeSection: string;
@@ -45,6 +47,7 @@ interface AppContextType {
     readyDrafts: number;
     scheduledCount: number;
     totalBrands: number;
+    evaluatedCount: number;
     compliancePassRate: number | null;
     hasEvaluatedContent: boolean;
     platformBreakdown: Record<PlatformType, number>;
@@ -74,12 +77,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeSection, setActiveSection] = useState<string>('dashboard');
 
   // Load from LocalStorage with clean initial fallback
+  // Seed factories build dates relative to the actual current date, so the
+  // demo workspace never opens on a frozen calendar month.
   const [brands, setBrands] = useState<BrandProfile[]>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEYS.BRANDS);
-      return stored ? JSON.parse(stored) : INITIAL_BRANDS;
+      return stored ? JSON.parse(stored) : buildInitialBrands();
     } catch {
-      return INITIAL_BRANDS;
+      return buildInitialBrands();
     }
   });
 
@@ -96,18 +101,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [drafts, setDrafts] = useState<ContentDraft[]>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEYS.DRAFTS);
-      return stored ? JSON.parse(stored) : INITIAL_DRAFTS;
+      return stored ? JSON.parse(stored) : buildInitialDrafts();
     } catch {
-      return INITIAL_DRAFTS;
+      return buildInitialDrafts();
     }
   });
 
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEYS.EVENTS);
-      return stored ? JSON.parse(stored) : INITIAL_CALENDAR_EVENTS;
+      return stored ? JSON.parse(stored) : buildInitialCalendarEvents();
     } catch {
-      return INITIAL_CALENDAR_EVENTS;
+      return buildInitialCalendarEvents();
     }
   });
 
@@ -169,7 +174,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addBrand = (brandData: Omit<BrandProfile, 'id' | 'createdAt' | 'updatedAt'>): BrandProfile => {
     const newBrand: BrandProfile = {
       ...brandData,
-      id: `brand-${Date.now()}`,
+      id: generateEntityId('brand'),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -202,7 +207,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const saveDraft = (draftData: Omit<ContentDraft, 'id' | 'createdAt' | 'updatedAt'>): ContentDraft => {
     const newDraft: ContentDraft = {
       ...draftData,
-      id: `draft-${Date.now()}`,
+      id: generateEntityId('draft'),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -237,29 +242,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addCalendarEvent = (eventData: Omit<CalendarEvent, 'id'>): CalendarEvent => {
     const newEvent: CalendarEvent = {
       ...eventData,
-      id: `event-${Date.now()}`,
+      id: generateEntityId('event'),
     };
     setCalendarEvents(prev => [...prev, newEvent]);
     return newEvent;
   };
 
   const updateCalendarEvent = (updated: CalendarEvent) => {
-    setCalendarEvents(prev => prev.map(e => (e.id === updated.id ? updated : e)));
-    // If the event is linked to a draft, keep the draft status and date synchronized
+    // Compute the merged event list once from the current render-scope state
+    // (same guarantee the original code relied on for event handlers), then
+    // reuse it for both state updates to avoid stale closures.
+    const mergedEvents = calendarEvents.map(e => (e.id === updated.id ? updated : e));
+    setCalendarEvents(mergedEvents);
+    // If the event is linked to a draft, recompute the draft's schedule state
+    // from ALL of its events so status and scheduledDate stay consistent even
+    // when several events reference the same draft.
     if (updated.draftId) {
-      setDrafts(prev =>
-        prev.map(d => {
-          if (d.id === updated.draftId) {
-            return {
-              ...d,
-              status: updated.status,
-              scheduledDate: updated.status === 'scheduled' ? `${updated.date}T${updated.time}:00` : undefined,
-              updatedAt: new Date().toISOString(),
-            };
-          }
-          return d;
-        })
-      );
+      setDrafts(prev => recomputeDraftScheduleState({ drafts: prev, calendarEvents: mergedEvents, draftId: updated.draftId! }));
     }
   };
 
@@ -278,11 +277,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const resetToDemoData = () => {
-    setBrands(INITIAL_BRANDS);
-    setDrafts(INITIAL_DRAFTS);
-    setCalendarEvents(INITIAL_CALENDAR_EVENTS);
+    const freshBrands = buildInitialBrands();
+    setBrands(freshBrands);
+    setDrafts(buildInitialDrafts());
+    setCalendarEvents(buildInitialCalendarEvents());
     setSettings(DEFAULT_SETTINGS);
-    setActiveBrandId(INITIAL_BRANDS[0].id);
+    setActiveBrandId(freshBrands[0].id);
     localStorage.removeItem(STORAGE_KEYS.BRANDS);
     localStorage.removeItem(STORAGE_KEYS.DRAFTS);
     localStorage.removeItem(STORAGE_KEYS.EVENTS);
