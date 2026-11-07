@@ -12,6 +12,9 @@ import {
   FileCode,
   Clock,
   AlertCircle,
+  Share2,
+  Radio,
+  ExternalLink,
 } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
@@ -21,9 +24,10 @@ export const SettingsView: React.FC = () => {
   const [isCheckingAi, setIsCheckingAi] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [resetSuccess, setResetSuccess] = useState(false);
+  const [isConfirmingReset, setIsConfirmingReset] = useState(false);
 
-  // Active subtab: 'app' | 'ai' | 'supabase'
-  const [activeTab, setActiveTab] = useState<'app' | 'ai' | 'supabase'>('app');
+  // Active subtab: 'app' | 'ai' | 'supabase' | 'integrations'
+  const [activeTab, setActiveTab] = useState<'app' | 'ai' | 'supabase' | 'integrations'>('app');
 
   const checkAiHealth = async () => {
     setIsCheckingAi(true);
@@ -53,12 +57,11 @@ export const SettingsView: React.FC = () => {
     setTimeout(() => setSaveSuccess(false), 2000);
   };
 
-  const handleResetDemo = () => {
-    if (confirm('Reset all brand profiles, drafts, and calendar events to default Phase 1 demo data?')) {
-      resetToDemoData();
-      setResetSuccess(true);
-      setTimeout(() => setResetSuccess(false), 2500);
-    }
+  const confirmReset = () => {
+    resetToDemoData();
+    setIsConfirmingReset(false);
+    setResetSuccess(true);
+    setTimeout(() => setResetSuccess(false), 2500);
   };
 
   return (
@@ -99,10 +102,21 @@ export const SettingsView: React.FC = () => {
             <Database className="w-3.5 h-3.5" />
             <span>Supabase Architecture</span>
           </button>
+          <button
+            onClick={() => setActiveTab('integrations')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              activeTab === 'integrations'
+                ? 'bg-zinc-800 text-zinc-100 shadow-xs'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <Share2 className="w-3.5 h-3.5" />
+            <span>External Integrations</span>
+          </button>
         </div>
 
         <button
-          onClick={handleResetDemo}
+          onClick={() => setIsConfirmingReset(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-950 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-800 rounded-lg text-xs font-medium transition-colors"
         >
           <RotateCcw className="w-3.5 h-3.5" />
@@ -221,10 +235,10 @@ export const SettingsView: React.FC = () => {
                 />
                 <div>
                   <span className="text-xs font-medium text-zinc-200 block">
-                    Auto-persist Drafts to Local Storage
+                    Auto-save Generated Drafts to Content Library
                   </span>
                   <span className="text-[11px] text-zinc-500 block">
-                    Keep drafts synchronized in browser local storage between sessions until backend database integration is implemented.
+                    When enabled, campaigns generated in the Content Studio are automatically saved to your Content Library. When disabled, drafts remain in preview until you click Save.
                   </span>
                 </div>
               </label>
@@ -454,6 +468,112 @@ CREATE TABLE compliance_audit_log (
   checked_at TIMESTAMPTZ DEFAULT now()
 );`}
               </pre>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tab 4: External Integrations (Explicitly identifying all unimplemented integrations) */}
+      {activeTab === 'integrations' && (
+        <div className="space-y-6">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+            <div className="border-b border-zinc-800 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                  <Share2 className="w-4 h-4 text-emerald-400" />
+                  <span>External Channel & Social Publishing Integrations</span>
+                </h3>
+                <p className="text-xs text-zinc-500">
+                  Status of third-party social media APIs, CRM systems, and workflow webhooks.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 text-[11px] font-semibold font-mono rounded-md bg-zinc-800 text-amber-400 border border-zinc-700">
+                  PHASE 1 SCOPE: LOCAL WORKFLOW ONLY
+                </span>
+              </div>
+            </div>
+
+            {/* Architecture Notice */}
+            <div className="p-3.5 bg-zinc-950 border border-zinc-800/80 rounded-lg text-xs text-zinc-400 flex items-start gap-2.5">
+              <Radio className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5 animate-pulse" />
+              <div className="space-y-1">
+                <span className="font-semibold text-zinc-200 block">
+                  Honest Integration Status Notice (Anti-Fabrication Principle)
+                </span>
+                <p>
+                  Per Phase 1 technical rules, no external social publishing APIs, CRM connectors, or video rendering pipelines are active or fabricated. Content is generated, formatted, audited, and scheduled internally. Official API tokens and automated dispatch pipelines will be configured in Phase 2.
+                </p>
+              </div>
+            </div>
+
+            {/* Integration Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              {[
+                { name: 'Meta Graph API', desc: 'Direct publishing to Instagram Reels, Feed & Facebook Pages', target: 'Phase 2' },
+                { name: 'X / Twitter API v2', desc: 'Single-click publishing for single tweets and multi-post threads', target: 'Phase 2' },
+                { name: 'LinkedIn Community API', desc: 'Direct post publishing to company pages and executive profiles', target: 'Phase 2' },
+                { name: 'YouTube Data API v3', desc: 'Automated video and Shorts upload with tags and descriptions', target: 'Phase 2' },
+                { name: 'TikTok Content Posting API', desc: 'Direct video dispatch with custom captions and sound metadata', target: 'Phase 2' },
+                { name: 'Pinterest Marketing API', desc: 'Idea pin creation and visual board categorization', target: 'Phase 2' },
+                { name: 'WhatsApp Business Cloud API', desc: 'Broadcast campaign distribution and audience messaging', target: 'Phase 2' },
+                { name: 'HubSpot / Salesforce CRM', desc: 'Bidirectional sync of engagement, leads, and customer inquiries', target: 'Phase 2' },
+                { name: 'Zapier & Webhook Dispatcher', desc: 'Event-driven triggers on post publication and schedule events', target: 'Phase 2' },
+              ].map(item => (
+                <div key={item.name} className="p-3 bg-zinc-950 rounded-lg border border-zinc-800/80 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-zinc-200">{item.name}</span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 border border-zinc-800">
+                      NOT CONNECTED · {item.target}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-zinc-500 leading-relaxed">{item.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Demo Data In-UI Modal */}
+      {isConfirmingReset && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+          <div className="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl p-5 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-2.5 text-amber-400 border-b border-zinc-800 pb-3">
+              <AlertCircle className="w-5 h-5 shrink-0" />
+              <h3 className="text-sm font-semibold text-zinc-100">
+                Confirm Demo Data Reset
+              </h3>
+            </div>
+
+            <div className="space-y-2 text-xs text-zinc-300">
+              <p>
+                Are you sure you want to reset all workspace data to default Phase 1 demo state?
+              </p>
+              <div className="p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-400 space-y-1">
+                <span className="font-semibold text-zinc-300 block">Data Affected:</span>
+                <p>
+                  This will clear custom brand profiles, newly created drafts, and scheduled events in your browser's local storage and re-populate the original default demo dataset.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setIsConfirmingReset(false)}
+                className="px-3.5 py-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmReset}
+                className="px-4 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold shadow-xs"
+              >
+                Reset to Demo Data
+              </button>
             </div>
           </div>
         </div>

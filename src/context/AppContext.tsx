@@ -11,6 +11,12 @@ import {
   INITIAL_DRAFTS,
   INITIAL_CALENDAR_EVENTS,
 } from '../services/constants';
+import {
+  cascadeDeleteBrand,
+  syncDeleteCalendarEvent,
+  syncScheduleDraft,
+  calculateComplianceStats,
+} from '../utils/dataIntegrity';
 
 interface AppContextType {
   activeSection: string;
@@ -39,7 +45,8 @@ interface AppContextType {
     readyDrafts: number;
     scheduledCount: number;
     totalBrands: number;
-    compliancePassRate: number;
+    compliancePassRate: number | null;
+    hasEvaluatedContent: boolean;
     platformBreakdown: Record<PlatformType, number>;
   };
 }
@@ -178,14 +185,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteBrand = (id: string) => {
-    if (brands.length <= 1) {
-      return; // Keep at least one brand
-    }
-    const filtered = brands.filter(b => b.id !== id);
-    setBrands(filtered);
-    if (activeBrandId === id) {
-      setActiveBrandId(filtered[0]?.id || '');
-    }
+    const res = cascadeDeleteBrand({
+      brands,
+      drafts,
+      calendarEvents,
+      activeBrandId,
+      targetBrandId: id,
+    });
+    setBrands(res.brands);
+    setDrafts(res.drafts);
+    setCalendarEvents(res.calendarEvents);
+    setActiveBrandId(res.activeBrandId);
   };
 
   // Draft actions
@@ -212,40 +222,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const scheduleDraft = (draftId: string, date: string, time: string) => {
-    const draft = drafts.find(d => d.id === draftId);
-    if (!draft) return;
-
-    // Update draft status
-    const scheduledDateIso = `${date}T${time}:00`;
-    updateDraft({
-      ...draft,
-      status: 'scheduled',
-      scheduledDate: scheduledDateIso,
+    const res = syncScheduleDraft({
+      drafts,
+      calendarEvents,
+      draftId,
+      date,
+      time,
     });
-
-    // Create or update calendar event
-    const existingIndex = calendarEvents.findIndex(e => e.draftId === draftId);
-    if (existingIndex >= 0) {
-      const updatedEvents = [...calendarEvents];
-      updatedEvents[existingIndex] = {
-        ...updatedEvents[existingIndex],
-        date,
-        time,
-        status: 'scheduled',
-      };
-      setCalendarEvents(updatedEvents);
-    } else {
-      addCalendarEvent({
-        draftId: draft.id,
-        brandId: draft.brandId,
-        title: draft.title,
-        platform: draft.platform,
-        date,
-        time,
-        status: 'scheduled',
-        summary: draft.caption.slice(0, 100),
-      });
-    }
+    setDrafts(res.drafts);
+    setCalendarEvents(res.calendarEvents);
   };
 
   // Calendar actions
@@ -260,10 +245,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateCalendarEvent = (updated: CalendarEvent) => {
     setCalendarEvents(prev => prev.map(e => (e.id === updated.id ? updated : e)));
+    // If the event is linked to a draft, keep the draft status and date synchronized
+    if (updated.draftId) {
+      setDrafts(prev =>
+        prev.map(d => {
+          if (d.id === updated.draftId) {
+            return {
+              ...d,
+              status: updated.status,
+              scheduledDate: updated.status === 'scheduled' ? `${updated.date}T${updated.time}:00` : undefined,
+              updatedAt: new Date().toISOString(),
+            };
+          }
+          return d;
+        })
+      );
+    }
   };
 
   const deleteCalendarEvent = (id: string) => {
-    setCalendarEvents(prev => prev.filter(e => e.id !== id));
+    const res = syncDeleteCalendarEvent({
+      drafts,
+      calendarEvents,
+      targetEventId: id,
+    });
+    setDrafts(res.drafts);
+    setCalendarEvents(res.calendarEvents);
   };
 
   const updateSettings = (newSettings: Partial<AppSettings>) => {
@@ -285,39 +292,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Statistics calculation for the Dashboard
   const stats = useMemo(() => {
-    const total = drafts.length;
-    const ready = drafts.filter(d => d.status === 'ready').length;
-    const scheduled = calendarEvents.filter(e => e.status === 'scheduled').length;
-    const passedCompliance = drafts.filter(d => d.complianceStatus?.passed).length;
-    const rate = total > 0 ? Math.round((passedCompliance / total) * 100) : 100;
-
-    const breakdown: Record<PlatformType, number> = {
-      linkedin: 0,
-      x: 0,
-      instagram_reels: 0,
-      instagram_feed: 0,
-      youtube: 0,
-      tiktok: 0,
-      pinterest: 0,
-      whatsapp: 0,
-      email: 0,
-      blog_seo: 0,
-    };
-
-    drafts.forEach(d => {
-      if (breakdown[d.platform] !== undefined) {
-        breakdown[d.platform]++;
-      }
-    });
-
-    return {
-      totalDrafts: total,
-      readyDrafts: ready,
-      scheduledCount: scheduled,
-      totalBrands: brands.length,
-      compliancePassRate: rate,
-      platformBreakdown: breakdown,
-    };
+    return calculateComplianceStats({ drafts, calendarEvents, brands });
   }, [drafts, calendarEvents, brands]);
 
   return (

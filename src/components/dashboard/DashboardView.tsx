@@ -90,11 +90,17 @@ export const DashboardView: React.FC = () => {
 
         <div className="bg-zinc-900/80 border border-zinc-800/80 rounded-xl p-4 space-y-1">
           <div className="flex items-center justify-between text-zinc-400">
-            <span className="text-xs font-medium">Compliance Pass Rate</span>
+            <span className="text-xs font-medium">Editorial Quality & Anti-Fluff</span>
             <ShieldCheck className="w-4 h-4 text-teal-400" />
           </div>
-          <div className="text-2xl font-bold text-zinc-100">{stats.compliancePassRate}%</div>
-          <div className="text-[11px] text-zinc-500">Zero AI fluff phrase score</div>
+          <div className="text-2xl font-bold text-zinc-100">
+            {stats.compliancePassRate !== null ? `${stats.compliancePassRate}%` : '—'}
+          </div>
+          <div className="text-[11px] text-zinc-500">
+            {stats.hasEvaluatedContent
+              ? 'Passed style & length checks (non-legal)'
+              : 'Neutral: no drafts to evaluate'}
+          </div>
         </div>
 
         <div className="bg-zinc-900/80 border border-zinc-800/80 rounded-xl p-4 space-y-1">

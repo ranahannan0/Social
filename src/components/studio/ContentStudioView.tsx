@@ -45,7 +45,7 @@ const LANGUAGES: SupportedLanguage[] = [
 ];
 
 export const ContentStudioView: React.FC = () => {
-  const { activeBrand, saveDraft, setActiveSection } = useApp();
+  const { activeBrand, saveDraft, setActiveSection, settings } = useApp();
 
   // Generator inputs
   const [topic, setTopic] = useState('');
@@ -124,21 +124,54 @@ export const ContentStudioView: React.FC = () => {
       });
 
       if (res.success && res.data) {
-        setProjectTitle(res.data.title || `${topic} - ${platform.toUpperCase()}`);
-        setHooks({
+        const genTitle = res.data.title || `${topic} - ${platform.toUpperCase()}`;
+        const genHooks = {
           patternInterrupt: res.data.hooks.patternInterrupt,
           curiosityGap: res.data.hooks.curiosityGap,
           directBenefit: res.data.hooks.directBenefit,
-        });
+        };
+        const genCaption = res.data.primaryCaption;
+        const genCta = res.data.callToAction;
+        const genTags = res.data.hashtags || [];
+        const genVisual = res.data.visualDirection || '';
+        const genTakeaways = res.data.keyTakeaways || [];
+
+        setProjectTitle(genTitle);
+        setHooks(genHooks);
         setSelectedHookType('patternInterrupt');
-        setCaption(res.data.primaryCaption);
-        setCallToAction(res.data.callToAction);
-        setHashtags(res.data.hashtags || []);
-        setVisualDirection(res.data.visualDirection || '');
-        setKeyTakeaways(res.data.keyTakeaways || []);
+        setCaption(genCaption);
+        setCallToAction(genCta);
+        setHashtags(genTags);
+        setVisualDirection(genVisual);
+        setKeyTakeaways(genTakeaways);
         setGenerationSource(res.source);
         setIsFallback(Boolean(res.isFallback));
         setGenerationNote(res.note || null);
+
+        // Auto-save setting controls persistence: automatically save to library if enabled
+        if (settings.autoSaveDrafts) {
+          const autoDraft = saveDraft({
+            brandId: activeBrand?.id || 'brand-01',
+            title: genTitle,
+            topic,
+            platform,
+            objective,
+            language,
+            audience,
+            selectedHookType: 'patternInterrupt',
+            hooks: genHooks,
+            caption: genCaption,
+            callToAction: genCta,
+            hashtags: genTags,
+            visualDirection: genVisual,
+            keyTakeaways: genTakeaways,
+            status: 'draft',
+            complianceStatus: runComplianceCheck(genCaption, platform),
+          });
+          setSavedDraft(autoDraft);
+        } else {
+          setSavedDraft(null);
+        }
       }
     } catch (err: any) {
       setGenerationError(err.message || 'Generation failed. Please try again.');
@@ -625,7 +658,7 @@ export const ContentStudioView: React.FC = () => {
                       ) : (
                         <AlertTriangle className="w-4 h-4 text-amber-400" />
                       )}
-                      <span>Compliance Pre-Check Status</span>
+                      <span>Editorial Quality & Format Pre-Check</span>
                     </span>
                     <span
                       className={`text-[10px] font-mono px-2 py-0.5 rounded ${
@@ -634,9 +667,13 @@ export const ContentStudioView: React.FC = () => {
                           : 'bg-amber-950 text-amber-300 border border-amber-900'
                       }`}
                     >
-                      {compliance.passed ? 'PASSED' : 'ATTENTION REQUIRED'}
+                      {compliance.passed ? 'PASSED QUALITY' : 'ATTENTION REQUIRED'}
                     </span>
                   </div>
+
+                  <p className="text-[11px] text-zinc-500">
+                    Editorial tone and platform format check. Note: Does not constitute legal or regulatory compliance.
+                  </p>
 
                   {compliance.detectedFluff.length > 0 && (
                     <div className="text-xs text-red-300 bg-red-950/40 p-2 rounded border border-red-900/50">
@@ -655,11 +692,17 @@ export const ContentStudioView: React.FC = () => {
 
                 {/* Action Bar: Save to Library & Schedule */}
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-                  <div>
-                    {savedDraft && (
+                  <div className="flex items-center gap-2">
+                    {savedDraft ? (
                       <span className="text-xs text-emerald-400 font-medium flex items-center gap-1.5">
                         <Check className="w-4 h-4" />
                         <span>Saved to Content Library</span>
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-zinc-500">
+                        {settings.autoSaveDrafts
+                          ? 'Auto-save enabled: will save on generation'
+                          : 'Auto-save disabled: manual save required'}
                       </span>
                     )}
                   </div>

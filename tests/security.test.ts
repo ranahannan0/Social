@@ -17,6 +17,13 @@
  * 13. Numeric TRUST_PROXY_HOPS resolution and rejection of boolean true
  */
 import { resolveTrustProxyHops } from '../src/utils/proxy';
+import {
+  cascadeDeleteBrand,
+  syncDeleteCalendarEvent,
+  syncScheduleDraft,
+  calculateComplianceStats,
+} from '../src/utils/dataIntegrity';
+import { BrandProfile, ContentDraft, CalendarEvent } from '../src/types';
 
 const BASE_URL = process.env.TEST_URL || 'http://localhost:3000';
 
@@ -235,6 +242,141 @@ async function runAllTests() {
       passed: allPassed,
       expected: 'Strict numeric parsing: 0 for undefined/empty/true/negative/invalid, numeric N for valid integers',
       actual: `default=${checkDefault}, true=${checkTrue}, negative=${checkNegative}, 1=${checkHop1}, 2=${checkHop2}`,
+    };
+  });
+
+  // 8c. Brand Deletion & Related Records Cleanup
+  await assertTest('Cascade Brand Deletion Purges Related Drafts & Calendar Events', async () => {
+    const mockBrands: BrandProfile[] = [
+      { id: 'b1', name: 'Brand 1', tagline: '', industry: '', targetAudience: '', brandVoice: { tone: '', bannedWords: [], styleGuidelines: '', sampleCopy: '' }, preferredLanguage: 'English', productsAndServices: [], createdAt: '', updatedAt: '' },
+      { id: 'b2', name: 'Brand 2', tagline: '', industry: '', targetAudience: '', brandVoice: { tone: '', bannedWords: [], styleGuidelines: '', sampleCopy: '' }, preferredLanguage: 'English', productsAndServices: [], createdAt: '', updatedAt: '' },
+    ];
+    const mockDrafts: ContentDraft[] = [
+      { id: 'd1', brandId: 'b1', title: 'Draft 1', topic: 'T1', platform: 'linkedin', objective: 'Authority', language: 'English', audience: '', selectedHookType: 'patternInterrupt', hooks: { patternInterrupt: '', curiosityGap: '', directBenefit: '' }, caption: 'C1', callToAction: '', hashtags: [], status: 'draft', complianceStatus: { passed: true, detectedFluff: [], charCount: 2, maxLimit: 3000, warnings: [] }, createdAt: '', updatedAt: '' },
+      { id: 'd2', brandId: 'b2', title: 'Draft 2', topic: 'T2', platform: 'x', objective: 'Lead Gen', language: 'English', audience: '', selectedHookType: 'patternInterrupt', hooks: { patternInterrupt: '', curiosityGap: '', directBenefit: '' }, caption: 'C2', callToAction: '', hashtags: [], status: 'draft', complianceStatus: { passed: true, detectedFluff: [], charCount: 2, maxLimit: 280, warnings: [] }, createdAt: '', updatedAt: '' },
+    ];
+    const mockEvents: CalendarEvent[] = [
+      { id: 'e1', draftId: 'd1', brandId: 'b1', title: 'E1', platform: 'linkedin', date: '2026-11-10', time: '10:00', status: 'scheduled', summary: '' },
+      { id: 'e2', draftId: 'd2', brandId: 'b2', title: 'E2', platform: 'x', date: '2026-11-12', time: '14:00', status: 'scheduled', summary: '' },
+    ];
+
+    const result = cascadeDeleteBrand({
+      brands: mockBrands,
+      drafts: mockDrafts,
+      calendarEvents: mockEvents,
+      activeBrandId: 'b1',
+      targetBrandId: 'b1',
+    });
+
+    const brandRemoved = !result.brands.some(b => b.id === 'b1');
+    const draftsPurged = !result.drafts.some(d => d.brandId === 'b1');
+    const eventsPurged = !result.calendarEvents.some(e => e.brandId === 'b1' || e.draftId === 'd1');
+    const activeReassigned = result.activeBrandId === 'b2';
+
+    const passed = brandRemoved && draftsPurged && eventsPurged && activeReassigned;
+
+    return {
+      passed,
+      expected: 'Brand b1, draft d1, and event e1 removed; activeBrandId reassigned to b2',
+      actual: `brandRemoved=${brandRemoved}, draftsPurged=${draftsPurged}, eventsPurged=${eventsPurged}, active=${result.activeBrandId}`,
+    };
+  });
+
+  // 8d. Active Brand Reassignment Safety
+  await assertTest('Active Brand Reassignment When Target Deleted', async () => {
+    const mockBrands: BrandProfile[] = [
+      { id: 'b1', name: 'Brand 1', tagline: '', industry: '', targetAudience: '', brandVoice: { tone: '', bannedWords: [], styleGuidelines: '', sampleCopy: '' }, preferredLanguage: 'English', productsAndServices: [], createdAt: '', updatedAt: '' },
+      { id: 'b2', name: 'Brand 2', tagline: '', industry: '', targetAudience: '', brandVoice: { tone: '', bannedWords: [], styleGuidelines: '', sampleCopy: '' }, preferredLanguage: 'English', productsAndServices: [], createdAt: '', updatedAt: '' },
+    ];
+
+    const result = cascadeDeleteBrand({
+      brands: mockBrands,
+      drafts: [],
+      calendarEvents: [],
+      activeBrandId: 'b1',
+      targetBrandId: 'b1',
+    });
+
+    return {
+      passed: result.activeBrandId === 'b2' && result.brands.length === 1,
+      expected: 'activeBrandId automatically reassigned to b2',
+      actual: `activeBrandId=${result.activeBrandId}, remainingBrands=${result.brands.length}`,
+    };
+  });
+
+  // 8e. Calendar Event Deletion & Draft Status Sync
+  await assertTest('Calendar Event Deletion Resets Draft Status & Clears ScheduledDate', async () => {
+    const mockDrafts: ContentDraft[] = [
+      { id: 'd1', brandId: 'b1', title: 'Draft 1', topic: 'T1', platform: 'linkedin', objective: 'Authority', language: 'English', audience: '', selectedHookType: 'patternInterrupt', hooks: { patternInterrupt: '', curiosityGap: '', directBenefit: '' }, caption: 'C1', callToAction: '', hashtags: [], status: 'scheduled', scheduledDate: '2026-11-10T10:00:00', complianceStatus: { passed: true, detectedFluff: [], charCount: 2, maxLimit: 3000, warnings: [] }, createdAt: '', updatedAt: '' },
+    ];
+    const mockEvents: CalendarEvent[] = [
+      { id: 'e1', draftId: 'd1', brandId: 'b1', title: 'E1', platform: 'linkedin', date: '2026-11-10', time: '10:00', status: 'scheduled', summary: '' },
+    ];
+
+    const result = syncDeleteCalendarEvent({
+      drafts: mockDrafts,
+      calendarEvents: mockEvents,
+      targetEventId: 'e1',
+    });
+
+    const updatedDraft = result.drafts.find(d => d.id === 'd1');
+    const eventRemoved = !result.calendarEvents.some(e => e.id === 'e1');
+    const statusReset = updatedDraft?.status === 'ready';
+    const dateCleared = updatedDraft?.scheduledDate === undefined;
+
+    const passed = eventRemoved && statusReset && dateCleared;
+
+    return {
+      passed,
+      expected: 'Event e1 removed, draft status reset to "ready", scheduledDate cleared',
+      actual: `eventRemoved=${eventRemoved}, status=${updatedDraft?.status}, scheduledDate=${updatedDraft?.scheduledDate}`,
+    };
+  });
+
+  // 8f. Rescheduling Draft Without Duplicate Events
+  await assertTest('Rescheduling Draft Updates Event In-Place Without Duplicates', async () => {
+    const mockDrafts: ContentDraft[] = [
+      { id: 'd1', brandId: 'b1', title: 'Draft 1', topic: 'T1', platform: 'linkedin', objective: 'Authority', language: 'English', audience: '', selectedHookType: 'patternInterrupt', hooks: { patternInterrupt: '', curiosityGap: '', directBenefit: '' }, caption: 'Caption text', callToAction: '', hashtags: [], status: 'ready', complianceStatus: { passed: true, detectedFluff: [], charCount: 2, maxLimit: 3000, warnings: [] }, createdAt: '', updatedAt: '' },
+    ];
+    const mockEvents: CalendarEvent[] = [
+      { id: 'e1', draftId: 'd1', brandId: 'b1', title: 'Draft 1', platform: 'linkedin', date: '2026-11-10', time: '10:00', status: 'scheduled', summary: '' },
+    ];
+
+    // Reschedule d1 to new date 2026-11-15
+    const result = syncScheduleDraft({
+      drafts: mockDrafts,
+      calendarEvents: mockEvents,
+      draftId: 'd1',
+      date: '2026-11-15',
+      time: '14:00',
+    });
+
+    const d1Events = result.calendarEvents.filter(e => e.draftId === 'd1');
+    const singleEvent = d1Events.length === 1;
+    const updatedDate = d1Events[0]?.date === '2026-11-15';
+
+    return {
+      passed: singleEvent && updatedDate,
+      expected: 'Exactly 1 calendar event with date updated to 2026-11-15',
+      actual: `eventCount=${d1Events.length}, date=${d1Events[0]?.date}`,
+    };
+  });
+
+  // 8g. Neutral Empty Compliance Statistics
+  await assertTest('Compliance Statistics Return Neutral State When Zero Drafts Exist', async () => {
+    const stats = calculateComplianceStats({
+      drafts: [],
+      calendarEvents: [],
+      brands: [{ id: 'b1', name: 'B1', tagline: '', industry: '', targetAudience: '', brandVoice: { tone: '', bannedWords: [], styleGuidelines: '', sampleCopy: '' }, preferredLanguage: 'English', productsAndServices: [], createdAt: '', updatedAt: '' }],
+    });
+
+    const isNullRate = stats.compliancePassRate === null;
+    const notEvaluated = stats.hasEvaluatedContent === false;
+
+    return {
+      passed: isNullRate && notEvaluated,
+      expected: 'compliancePassRate is null and hasEvaluatedContent is false when drafts is empty',
+      actual: `passRate=${stats.compliancePassRate}, hasEvaluated=${stats.hasEvaluatedContent}`,
     };
   });
 

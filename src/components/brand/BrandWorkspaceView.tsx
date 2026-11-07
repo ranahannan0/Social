@@ -32,6 +32,8 @@ export const BrandWorkspaceView: React.FC = () => {
     updateBrand,
     deleteBrand,
     setActiveSection,
+    drafts,
+    calendarEvents,
   } = useApp();
 
   const activeBrand = brands.find(b => b.id === activeBrandId) || brands[0];
@@ -47,12 +49,20 @@ export const BrandWorkspaceView: React.FC = () => {
   });
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isCreatingNew, setIsCreatingNew] = useState(false);
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  const [deleteWarning, setDeleteWarning] = useState<string | null>(null);
+
+  // Associated records for current brand to prevent orphaned data
+  const associatedDraftsCount = drafts.filter(d => d.brandId === formData.id).length;
+  const associatedEventsCount = calendarEvents.filter(e => e.brandId === formData.id).length;
 
   // When activeBrandId changes, sync formData
   React.useEffect(() => {
     if (activeBrand) {
       setFormData(activeBrand);
       setIsCreatingNew(false);
+      setIsConfirmingDelete(false);
+      setDeleteWarning(null);
     }
   }, [activeBrandId, activeBrand]);
 
@@ -77,6 +87,7 @@ export const BrandWorkspaceView: React.FC = () => {
     };
     setFormData(blankBrand);
     setIsCreatingNew(true);
+    setIsConfirmingDelete(false);
   };
 
   const handleSave = (e: React.FormEvent) => {
@@ -104,14 +115,18 @@ export const BrandWorkspaceView: React.FC = () => {
     setTimeout(() => setSaveSuccess(false), 2500);
   };
 
-  const handleDelete = () => {
+  const initiateDelete = () => {
     if (brands.length <= 1) {
-      alert('You must have at least one active brand profile.');
+      setDeleteWarning('You must maintain at least one brand workspace profile in the system.');
+      setTimeout(() => setDeleteWarning(null), 3000);
       return;
     }
-    if (confirm(`Are you sure you want to delete "${formData.name}"?`)) {
-      deleteBrand(formData.id);
-    }
+    setIsConfirmingDelete(true);
+  };
+
+  const confirmDelete = () => {
+    deleteBrand(formData.id);
+    setIsConfirmingDelete(false);
   };
 
   const handleAddBannedWord = () => {
@@ -533,16 +548,22 @@ export const BrandWorkspaceView: React.FC = () => {
 
         {/* Action Bar */}
         <div className="flex items-center justify-between p-4 bg-zinc-900 border border-zinc-800 rounded-xl">
-          <div>
+          <div className="flex items-center gap-3">
             {!isCreatingNew && brands.length > 1 && (
               <button
                 type="button"
-                onClick={handleDelete}
+                onClick={initiateDelete}
                 className="flex items-center gap-1.5 px-3 py-2 text-red-400 hover:text-red-300 hover:bg-red-950/40 rounded-lg text-xs font-medium transition-colors"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>Delete Brand Profile</span>
               </button>
+            )}
+            {deleteWarning && (
+              <span className="text-xs text-amber-400 flex items-center gap-1.5 animate-in fade-in">
+                <AlertCircle className="w-3.5 h-3.5" />
+                <span>{deleteWarning}</span>
+              </span>
             )}
           </div>
 
@@ -572,6 +593,62 @@ export const BrandWorkspaceView: React.FC = () => {
           </div>
         </div>
       </form>
+
+      {/* Confirmation Modal for Brand Deletion */}
+      {isConfirmingDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+          <div className="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl p-5 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-2.5 text-red-400 border-b border-zinc-800 pb-3">
+              <AlertCircle className="w-5 h-5 shrink-0" />
+              <h3 className="text-sm font-semibold text-zinc-100">
+                Confirm Brand Deletion
+              </h3>
+            </div>
+
+            <div className="space-y-3 text-xs text-zinc-300">
+              <p>
+                Are you sure you want to delete <span className="font-semibold text-zinc-100">"{formData.name}"</span>?
+              </p>
+              <div className="p-3 bg-red-950/30 border border-red-900/50 rounded-lg space-y-1.5 text-zinc-400">
+                <span className="font-semibold text-red-300 block">
+                  Cascading Cleanup & Data Integrity Notice:
+                </span>
+                <p>
+                  To prevent orphaned records, this deletion will permanently purge:
+                </p>
+                <ul className="list-disc list-inside space-y-0.5 text-zinc-300 pl-1">
+                  <li>
+                    <span className="font-semibold text-zinc-100">{associatedDraftsCount}</span> associated content draft(s)
+                  </li>
+                  <li>
+                    <span className="font-semibold text-zinc-100">{associatedEventsCount}</span> scheduled calendar campaign(s)
+                  </li>
+                </ul>
+                <p className="text-[11px] text-zinc-500 pt-1">
+                  The active brand will automatically be reassigned to your remaining workspace profile.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setIsConfirmingDelete(false)}
+                className="px-3.5 py-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDelete}
+                className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-semibold shadow-xs"
+              >
+                Delete Brand & Associated Records
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
