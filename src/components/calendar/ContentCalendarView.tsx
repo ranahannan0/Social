@@ -3,6 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { CalendarEvent, PlatformType } from '../../types';
 import { PLATFORMS_CONFIG } from '../../services/constants';
 import { PlatformIcon } from '../common/PlatformIcon';
+import { getLocalDateString } from '../../utils/dateUtils';
 import {
   CalendarDays,
   ChevronLeft,
@@ -23,7 +24,7 @@ export const ContentCalendarView: React.FC = () => {
   const { calendarEvents, addCalendarEvent, deleteCalendarEvent, drafts, brands, activeBrandId } = useApp();
 
   const [viewMode, setViewMode] = useState<CalendarViewMode>('month');
-  const [currentDate, setCurrentDate] = useState<Date>(new Date(2026, 10, 7)); // Reference November 2026
+  const [currentDate, setCurrentDate] = useState<Date>(() => new Date());
 
   // Selected event modal
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
@@ -33,7 +34,7 @@ export const ContentCalendarView: React.FC = () => {
   const [newEvent, setNewEvent] = useState({
     title: '',
     platform: 'linkedin' as PlatformType,
-    date: new Date(2026, 10, 10).toISOString().split('T')[0],
+    date: getLocalDateString(new Date()),
     time: '10:00',
     status: 'scheduled' as 'draft' | 'scheduled',
     summary: '',
@@ -109,7 +110,7 @@ export const ContentCalendarView: React.FC = () => {
     setNewEvent({
       title: '',
       platform: 'linkedin',
-      date: new Date(2026, 10, 10).toISOString().split('T')[0],
+      date: getLocalDateString(new Date()),
       time: '10:00',
       status: 'scheduled',
       summary: '',

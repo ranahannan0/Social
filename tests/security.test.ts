@@ -362,6 +362,38 @@ async function runAllTests() {
     };
   });
 
+  // 8f-2. Purging Pre-Existing Duplicate Calendar Events
+  await assertTest('Rescheduling Draft Purges Pre-Existing Duplicate Events', async () => {
+    const mockDrafts: ContentDraft[] = [
+      { id: 'd1', brandId: 'b1', title: 'Draft 1', topic: 'T1', platform: 'linkedin', objective: 'Authority', language: 'English', audience: '', selectedHookType: 'patternInterrupt', hooks: { patternInterrupt: '', curiosityGap: '', directBenefit: '' }, caption: 'Caption text', callToAction: '', hashtags: [], status: 'ready', complianceStatus: { passed: true, detectedFluff: [], charCount: 2, maxLimit: 3000, warnings: [] }, createdAt: '', updatedAt: '' },
+    ];
+    // Pre-existing duplicates for draft d1
+    const mockEvents: CalendarEvent[] = [
+      { id: 'e1', draftId: 'd1', brandId: 'b1', title: 'Draft 1 Dup A', platform: 'linkedin', date: '2026-11-10', time: '10:00', status: 'scheduled', summary: '' },
+      { id: 'e2', draftId: 'd1', brandId: 'b1', title: 'Draft 1 Dup B', platform: 'linkedin', date: '2026-11-11', time: '11:00', status: 'scheduled', summary: '' },
+      { id: 'e3', draftId: 'd1', brandId: 'b1', title: 'Draft 1 Dup C', platform: 'linkedin', date: '2026-11-12', time: '12:00', status: 'scheduled', summary: '' },
+    ];
+
+    const result = syncScheduleDraft({
+      drafts: mockDrafts,
+      calendarEvents: mockEvents,
+      draftId: 'd1',
+      date: '2026-11-20',
+      time: '16:00',
+    });
+
+    const d1Events = result.calendarEvents.filter(e => e.draftId === 'd1');
+    const singleCanonical = d1Events.length === 1;
+    const updatedDate = d1Events[0]?.date === '2026-11-20';
+    const updatedTime = d1Events[0]?.time === '16:00';
+
+    return {
+      passed: singleCanonical && updatedDate && updatedTime,
+      expected: 'Purged 2 duplicate events, retaining 1 canonical event scheduled for 2026-11-20 16:00',
+      actual: `eventCount=${d1Events.length}, date=${d1Events[0]?.date}, time=${d1Events[0]?.time}`,
+    };
+  });
+
   // 8g. Neutral Empty Compliance Statistics
   await assertTest('Compliance Statistics Return Neutral State When Zero Drafts Exist', async () => {
     const stats = calculateComplianceStats({
@@ -376,6 +408,34 @@ async function runAllTests() {
     return {
       passed: isNullRate && notEvaluated,
       expected: 'compliancePassRate is null and hasEvaluatedContent is false when drafts is empty',
+      actual: `passRate=${stats.compliancePassRate}, hasEvaluated=${stats.hasEvaluatedContent}`,
+    };
+  });
+
+  // 8h. Compliance Pass Rate Calculated Strictly Over Evaluated Drafts Only
+  await assertTest('Editorial Pass Rate Calculated Strictly Over Evaluated Drafts Only', async () => {
+    const mockDrafts: ContentDraft[] = [
+      // Evaluated draft 1: passed
+      { id: 'd1', brandId: 'b1', title: 'D1', topic: 'T1', platform: 'linkedin', objective: 'Authority', language: 'English', audience: '', selectedHookType: 'patternInterrupt', hooks: { patternInterrupt: '', curiosityGap: '', directBenefit: '' }, caption: 'C1', callToAction: '', hashtags: [], status: 'ready', complianceStatus: { passed: true, detectedFluff: [], charCount: 2, maxLimit: 3000, warnings: [] }, createdAt: '', updatedAt: '' },
+      // Evaluated draft 2: failed
+      { id: 'd2', brandId: 'b1', title: 'D2', topic: 'T2', platform: 'linkedin', objective: 'Authority', language: 'English', audience: '', selectedHookType: 'patternInterrupt', hooks: { patternInterrupt: '', curiosityGap: '', directBenefit: '' }, caption: 'C2', callToAction: '', hashtags: [], status: 'ready', complianceStatus: { passed: false, detectedFluff: ['delve into'], charCount: 2, maxLimit: 3000, warnings: [] }, createdAt: '', updatedAt: '' },
+      // Unevaluated draft 3 (no complianceStatus)
+      { id: 'd3', brandId: 'b1', title: 'D3', topic: 'T3', platform: 'linkedin', objective: 'Authority', language: 'English', audience: '', selectedHookType: 'patternInterrupt', hooks: { patternInterrupt: '', curiosityGap: '', directBenefit: '' }, caption: 'C3', callToAction: '', hashtags: [], status: 'ready', complianceStatus: undefined as any, createdAt: '', updatedAt: '' },
+    ];
+
+    const stats = calculateComplianceStats({
+      drafts: mockDrafts,
+      calendarEvents: [],
+      brands: [{ id: 'b1', name: 'B1', tagline: '', industry: '', targetAudience: '', brandVoice: { tone: '', bannedWords: [], styleGuidelines: '', sampleCopy: '' }, preferredLanguage: 'English', productsAndServices: [], createdAt: '', updatedAt: '' }],
+    });
+
+    // 1 passed out of 2 evaluated drafts = 50%
+    const is50Percent = stats.compliancePassRate === 50;
+    const hasEvaluated = stats.hasEvaluatedContent === true;
+
+    return {
+      passed: is50Percent && hasEvaluated,
+      expected: 'compliancePassRate is 50% (1/2 evaluated drafts) and hasEvaluatedContent is true',
       actual: `passRate=${stats.compliancePassRate}, hasEvaluated=${stats.hasEvaluatedContent}`,
     };
   });

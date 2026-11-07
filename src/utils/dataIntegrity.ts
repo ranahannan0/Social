@@ -116,12 +116,15 @@ export function syncScheduleDraft(params: {
       : d
   );
 
-  const existingIndex = calendarEvents.findIndex(e => e.draftId === draftId);
+  // Find all existing events for this draft to prevent and remove duplicates
+  const matchingEvents = calendarEvents.filter(e => e.draftId === draftId);
   let updatedEvents: CalendarEvent[];
-  if (existingIndex >= 0) {
-    updatedEvents = [...calendarEvents];
-    updatedEvents[existingIndex] = {
-      ...updatedEvents[existingIndex],
+
+  if (matchingEvents.length > 0) {
+    // Retain the first matching event as canonical and purge all duplicate events
+    const canonicalEvent = matchingEvents[0];
+    const updatedCanonical: CalendarEvent = {
+      ...canonicalEvent,
       date,
       time,
       status: 'scheduled',
@@ -129,6 +132,10 @@ export function syncScheduleDraft(params: {
       platform: draft.platform,
       summary: draft.caption.slice(0, 100),
     };
+
+    // Filter out all events linked to this draftId, then put back only the updated canonical one
+    const otherEvents = calendarEvents.filter(e => e.draftId !== draftId);
+    updatedEvents = [...otherEvents, updatedCanonical];
   } else {
     const newEvent: CalendarEvent = {
       id: `event-${Date.now()}`,
@@ -151,10 +158,11 @@ export function syncScheduleDraft(params: {
 }
 
 /**
- * Compliance & Statistics Calculation
- * - Never returns 100% when no drafts exist.
- * - Returns neutral null state when totalDrafts === 0.
- * - Distinguishes anti-fluff editorial checks from regulatory compliance.
+ * Editorial Quality Statistics Calculation
+ * - Calculates pass rate using evaluated drafts only (drafts with complianceStatus).
+ * - If no drafts have been evaluated (evaluatedCount === 0), returns neutral null pass rate.
+ * - Sets hasEvaluatedContent strictly based on evaluatedDrafts.length > 0.
+ * - Never labels editorial quality checks as legal compliance.
  */
 export function calculateComplianceStats(params: {
   drafts: ContentDraft[];
@@ -165,10 +173,15 @@ export function calculateComplianceStats(params: {
   const total = drafts.length;
   const ready = drafts.filter(d => d.status === 'ready').length;
   const scheduled = calendarEvents.filter(e => e.status === 'scheduled').length;
+
+  // Filter drafts that have been evaluated by compliance check
   const evaluatedDrafts = drafts.filter(d => d.complianceStatus !== undefined);
+  const evaluatedCount = evaluatedDrafts.length;
   const passedQuality = evaluatedDrafts.filter(d => d.complianceStatus?.passed).length;
 
-  const compliancePassRate: number | null = total > 0 ? Math.round((passedQuality / total) * 100) : null;
+  // Pass rate is calculated ONLY over evaluated drafts. If evaluatedCount === 0, return null empty state.
+  const compliancePassRate: number | null = evaluatedCount > 0 ? Math.round((passedQuality / evaluatedCount) * 100) : null;
+  const hasEvaluatedContent = evaluatedCount > 0;
 
   const breakdown: Record<PlatformType, number> = {
     linkedin: 0,
@@ -195,7 +208,7 @@ export function calculateComplianceStats(params: {
     scheduledCount: scheduled,
     totalBrands: brands.length,
     compliancePassRate,
-    hasEvaluatedContent: total > 0,
+    hasEvaluatedContent,
     platformBreakdown: breakdown,
   };
 }
