@@ -125,6 +125,27 @@ export function getAuthedUser(req: Request): AuthedUser {
   return u;
 }
 
+/**
+ * Conditional auth gate: in local mode, passes through (legacy open behaviour
+ * for routes like /api/generate that predate Phase 2). In supabase mode,
+ * behaves exactly like requireSupabaseAuth.
+ *
+ * Per design doc §9: "Every Express route gains JWT verification" — but the
+ * gate is naturally a no-op when Supabase isn't configured, because there is
+ * no JWT to verify and no upstream to verify it against. This keeps the local
+ * dev + integration test harness working without auth.
+ */
+export function requireSupabaseAuthWhenConfigured(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  if (getStorageMode() !== 'supabase' || !isSupabaseConfigured()) {
+    return next();
+  }
+  requireSupabaseAuth(req, res, next);
+}
+
 export async function getUserScopedClient(jwt: string) {
   if (!(await ensureClients())) return null;
   return clients.factory ? clients.factory(jwt) : null;

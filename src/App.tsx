@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { Sidebar } from './components/layout/Sidebar';
 import { Header } from './components/layout/Header';
 import { DashboardView } from './components/dashboard/DashboardView';
@@ -8,6 +9,8 @@ import { ContentStudioView } from './components/studio/ContentStudioView';
 import { ContentLibraryView } from './components/library/ContentLibraryView';
 import { ContentCalendarView } from './components/calendar/ContentCalendarView';
 import { SettingsView } from './components/settings/SettingsView';
+import { AuthScreen } from './components/auth/AuthScreen';
+import { Loader2, Sparkles } from 'lucide-react';
 
 const AppContent: React.FC = () => {
   const { activeSection } = useApp();
@@ -41,7 +44,7 @@ const AppContent: React.FC = () => {
           <div className="flex flex-col sm:flex-row items-center justify-between gap-2 max-w-7xl mx-auto">
             <span>OMNI CHANNEL PLUS v2.0 · Central AI Growth & Social Engine Core</span>
             <div className="flex items-center gap-3">
-              <span>Phase 1 Foundation Active</span>
+              <span>Phase 2 Cloud-Active</span>
               <span aria-hidden="true">·</span>
               {/* Model-agnostic label: the active Gemini model is env-configured
                   (GEMINI_MODEL) and must not be hardcoded in UI copy. */}
@@ -54,10 +57,46 @@ const AppContent: React.FC = () => {
   );
 };
 
-export default function App() {
+/**
+ * Session gate: while the AuthProvider is booting (probing /api/auth/me), show
+ * a branded splash. If there is no user, show the AuthScreen. Only when a user
+ * is resolved do we mount AppProvider + AppContent — this guarantees
+ * AppContext's hydration effect runs once with a known authed state.
+ */
+const SessionGate: React.FC = () => {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center font-sans">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center">
+            <Sparkles className="w-5 h-5 text-emerald-400" />
+          </div>
+          <div className="flex items-center gap-2 text-sm text-zinc-500">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            <span>Loading workspace…</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthScreen />;
+  }
+
   return (
     <AppProvider>
       <AppContent />
     </AppProvider>
+  );
+};
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <SessionGate />
+    </AuthProvider>
   );
 }

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../context/AuthContext';
 import { apiService, AiStatusResponse } from '../../services/api';
 import {
   Settings,
@@ -16,11 +17,29 @@ import {
   Radio,
   ExternalLink,
   Download,
+  UploadCloud,
+  LogOut,
+  Loader2,
+  User,
+  Cloud,
+  CloudOff,
 } from 'lucide-react';
 import { downloadWorkspaceExport } from '../../utils/workspaceExport';
 
 export const SettingsView: React.FC = () => {
-  const { settings, updateSettings, brands, resetToDemoData } = useApp();
+  const {
+    settings,
+    updateSettings,
+    brands,
+    resetToDemoData,
+    syncToCloud,
+    syncing,
+    lastSyncAt,
+    lastSyncSummary,
+    hydrationStatus,
+    hydrationError,
+  } = useApp();
+  const { user, signOut } = useAuth();
 
   const [aiStatus, setAiStatus] = useState<AiStatusResponse | null>(null);
   const [isCheckingAi, setIsCheckingAi] = useState(false);
@@ -403,121 +422,173 @@ export const SettingsView: React.FC = () => {
         </div>
       )}
 
-      {/* Tab 3: Supabase Architecture (Task 6: Clearly labeled as Planned, NOT connected) */}
+      {/* Tab 3: Cloud Storage (Phase 2 — live) */}
       {activeTab === 'supabase' && (
         <div className="space-y-6">
+          {/* Account / auth status */}
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
             <div className="border-b border-zinc-800 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                  <Database className="w-4 h-4 text-zinc-400" />
-                  <span>Planned Supabase Architecture (Phase 2+)</span>
+                  <Cloud className="w-4 h-4 text-emerald-400" />
+                  <span>Cloud Storage (Phase 2 — Live)</span>
                 </h3>
                 <p className="text-xs text-zinc-500">
-                  Target schema specifications for upcoming multi-tenant database integration.
+                  Your workspace is backed by a hosted Postgres database with per-account row-level security.
                 </p>
               </div>
 
               <div className="flex items-center gap-2">
-                <span className="px-2.5 py-1 text-[11px] font-semibold font-mono rounded-md bg-zinc-800 text-zinc-400 border border-zinc-700">
-                  STATUS: NOT CONNECTED
-                </span>
-                <span className="px-2.5 py-1 text-[11px] font-mono rounded-md bg-zinc-950 text-zinc-400 border border-zinc-800">
-                  Active Storage: LocalStorage (Phase 1)
+                <span className="px-2.5 py-1 text-[11px] font-semibold font-mono rounded-md bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+                  STATUS: CONNECTED
                 </span>
               </div>
             </div>
 
-            {/* Architecture Notice */}
+            {/* Account block */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 p-3 bg-zinc-950 rounded-lg border border-zinc-800/80">
+                <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center">
+                  <User className="w-4 h-4 text-emerald-400" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs text-zinc-500">Signed in as</div>
+                  <div className="text-sm text-zinc-100 font-medium truncate">
+                    {user?.email ?? 'Unknown account'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => signOut()}
+                  className="text-xs px-3 py-1.5 rounded-md border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors flex items-center gap-1.5"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  Sign out
+                </button>
+              </div>
+
+              {/* Hydration status */}
+              <div className="text-xs flex items-start gap-2 p-3 bg-zinc-950 rounded-lg border border-zinc-800/80">
+                {hydrationStatus === 'loading' && <Loader2 className="w-4 h-4 text-zinc-400 shrink-0 mt-0.5 animate-spin" />}
+                {hydrationStatus === 'ready' && <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />}
+                {hydrationStatus === 'error' && <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />}
+                {hydrationStatus === 'idle' && <Clock className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />}
+                <div className="flex-1">
+                  <div className="text-zinc-300 font-medium">
+                    {hydrationStatus === 'loading' && 'Loading workspace from cloud…'}
+                    {hydrationStatus === 'ready' && 'Workspace loaded from cloud.'}
+                    {hydrationStatus === 'error' && 'Cloud sync failed — showing local data.'}
+                    {hydrationStatus === 'idle' && 'Cloud sync idle.'}
+                  </div>
+                  {hydrationError && (
+                    <div className="text-red-400 mt-0.5">{hydrationError}</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Sync to Cloud */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                  <UploadCloud className="w-4 h-4 text-zinc-400" />
+                  <span>Sync to Cloud</span>
+                </h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  Push your current local edits ({brands.length} brands) to the cloud. Already-synced items are skipped (idempotent).
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => syncToCloud().catch((e: Error) => {
+                  setExportMsg({ ok: false, text: e.message || 'Sync failed.' });
+                  setTimeout(() => setExportMsg(null), 6000);
+                })}
+                disabled={syncing}
+                className="text-xs px-3.5 py-2 rounded-md bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5" />}
+                {syncing ? 'Syncing…' : 'Sync now'}
+              </button>
+            </div>
+
+            {(lastSyncAt || lastSyncSummary) && (
+              <div className="text-xs flex items-start gap-2 p-3 bg-zinc-950 rounded-lg border border-zinc-800/80">
+                <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  {lastSyncSummary && <div className="text-zinc-300">{lastSyncSummary}</div>}
+                  {lastSyncAt && (
+                    <div className="text-zinc-500 mt-0.5">
+                      Last sync: {new Date(lastSyncAt).toLocaleString()}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {exportMsg && (
+              <div
+                className={`text-xs flex items-start gap-2 p-3 rounded-lg border ${
+                  exportMsg.ok
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                    : 'bg-red-500/10 border-red-500/30 text-red-300'
+                }`}
+              >
+                {exportMsg.ok ? <Check className="w-4 h-4 shrink-0 mt-0.5" /> : <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />}
+                <span>{exportMsg.text}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Architecture notice (Phase 2 implemented) */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+            <div className="border-b border-zinc-800 pb-3">
+              <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                <Database className="w-4 h-4 text-zinc-400" />
+                <span>Phase 2 Architecture (Implemented)</span>
+              </h3>
+              <p className="text-xs text-zinc-500 mt-1">
+                Live schema on the hosted Postgres instance — migrations 0001–0008 applied.
+              </p>
+            </div>
+
             <div className="p-3.5 bg-zinc-950 border border-zinc-800/80 rounded-lg text-xs text-zinc-400 flex items-start gap-2.5">
-              <AlertCircle className="w-4 h-4 text-zinc-400 shrink-0 mt-0.5" />
+              <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
               <div className="space-y-1">
-                <span className="font-semibold text-zinc-300 block">Planned Architecture Specification</span>
+                <span className="font-semibold text-zinc-300 block">Live Modules</span>
                 <p>
-                  Supabase integration is not implemented in Phase 1. Current brand profiles, drafts, and calendar events are stored locally in the browser. The database schema below is prepared for Phase 2 implementation.
+                  Per-account row-level security, multi-tenant organizations, brand voice as JSONB, append-only compliance history, server-only DB access (browser never talks to Supabase directly), and workspace-level export/import for sync &amp; backup.
                 </p>
               </div>
             </div>
 
-            {/* Roadmap Modules */}
-            <div className="space-y-2">
-              <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
-                Planned Phase 2 Database Modules
-              </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-400">
-                  <Clock className="w-4 h-4 text-zinc-500 shrink-0" />
-                  <span>PostgreSQL Cloud Database (Planned · Phase 2)</span>
-                </div>
-                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-400">
-                  <Clock className="w-4 h-4 text-zinc-500 shrink-0" />
-                  <span>pgvector Brand Voice Embeddings (Planned · Phase 2)</span>
-                </div>
-                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-400">
-                  <Clock className="w-4 h-4 text-zinc-500 shrink-0" />
-                  <span>Row-Level Security Multi-Tenant Auth (Planned · Phase 2)</span>
-                </div>
-                <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-zinc-800/80 text-zinc-400">
-                  <Clock className="w-4 h-4 text-zinc-500 shrink-0" />
-                  <span>Persistent Compliance Audit Logging (Planned · Phase 2)</span>
-                </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+              <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-emerald-500/20 text-emerald-300">
+                <Check className="w-4 h-4 shrink-0" />
+                <span>Hosted PostgreSQL 17 · ap-southeast-1</span>
               </div>
-            </div>
-
-            {/* SQL Schema Reference */}
-            <div className="space-y-2 pt-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
-                  <FileCode className="w-3.5 h-3.5 text-zinc-400" />
-                  <span>Reference PostgreSQL DDL Schema (from Spec Appendix)</span>
-                </span>
-                <span className="text-[10px] font-mono text-zinc-500">Unexecuted Spec Reference</span>
+              <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-emerald-500/20 text-emerald-300">
+                <Check className="w-4 h-4 shrink-0" />
+                <span>Row-Level Security · 9 tables, ENABLE+FORCE</span>
               </div>
-
-              <pre className="p-3.5 bg-zinc-950 rounded-lg border border-zinc-800 font-mono text-[11px] text-zinc-400 overflow-x-auto leading-relaxed">
-{`-- Brand Voice Memory Schema (Planned for Phase 2 Supabase Integration)
-CREATE TABLE brand_voice_samples (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  content TEXT NOT NULL,
-  platform TEXT,
-  approved_at TIMESTAMPTZ,
-  embedding VECTOR(1537)
-);
-
-CREATE TABLE content_assets (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  type TEXT, -- article | reel | post | thread | email
-  platform TEXT,
-  status TEXT, -- draft | scheduled | published | archived
-  utm_campaign TEXT,
-  compliance_check_id UUID,
-  published_at TIMESTAMPTZ,
-  score_30d TEXT, -- A | B | C
-  payload JSONB
-);
-
-CREATE TABLE crm_interactions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_handle TEXT,
-  platform TEXT,
-  category TEXT, -- INQUIRY | ORDER | COMPLAINT | UGC | SPAM
-  sentiment TEXT,
-  urgency INT,
-  auto_reply TEXT,
-  escalated BOOLEAN,
-  opt_in BOOLEAN,
-  created_at TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE TABLE compliance_audit_log (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  asset_id UUID,
-  layer TEXT,
-  status TEXT,
-  evidence TEXT,
-  checked_at TIMESTAMPTZ DEFAULT now()
-);`}
-              </pre>
+              <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-emerald-500/20 text-emerald-300">
+                <Check className="w-4 h-4 shrink-0" />
+                <span>Server-only DB · JWT verified per request</span>
+              </div>
+              <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-emerald-500/20 text-emerald-300">
+                <Check className="w-4 h-4 shrink-0" />
+                <span>Default-privilege hardening · manual-exposure mode</span>
+              </div>
+              <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-amber-500/20 text-amber-300">
+                <Clock className="w-4 h-4 shrink-0" />
+                <span>Per-resource CRUD endpoints · Phase 3</span>
+              </div>
+              <div className="flex items-center gap-2 p-2.5 bg-zinc-950 rounded-lg border border-amber-500/20 text-amber-300">
+                <Clock className="w-4 h-4 shrink-0" />
+                <span>Real-time sync on mutation · Phase 3</span>
+              </div>
             </div>
           </div>
         </div>

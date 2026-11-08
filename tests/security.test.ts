@@ -490,6 +490,121 @@ async function runAllTests(): Promise<boolean> {
     };
   });
 
+  // 8j. Auth endpoints honest 501 in LOCAL storage mode
+  // The browser-facing auth routes (/api/auth/signup, /login, /logout, /me)
+  // must NOT fake a session when Supabase is not configured. They return 501
+  // SUPABASE_UNAVAILABLE so the frontend can show the right error.
+  await assertTest('Auth Signup Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'someone@example.com', password: 'password123' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'SUPABASE_UNAVAILABLE';
+    return {
+      passed: is501 && honest,
+      expected: '501 SUPABASE_UNAVAILABLE — never fake a signup in local mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Auth Login Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'someone@example.com', password: 'password123' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'SUPABASE_UNAVAILABLE';
+    return {
+      passed: is501 && honest,
+      expected: '501 SUPABASE_UNAVAILABLE — never fake a login in local mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Auth Me Returns 401 Without Bearer Token', async () => {
+    // In local mode, /me still returns 401 (not 501) because the gate is
+    // "no token = unauthorized" regardless of storage mode — the route is
+    // explicitly designed to verify tokens, not to gate on Supabase.
+    const res = await fetch(`${BASE_URL}/api/auth/me`);
+    const body = await res.json().catch(() => ({}));
+    const is401 = res.status === 401;
+    const honest = body.error === 'UNAUTHORIZED';
+    return {
+      passed: is401 && honest,
+      expected: '401 UNAUTHORIZED when no bearer token is supplied',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Auth Logout Is Idempotent Without Bearer Token (200 OK)', async () => {
+    // Logout NEVER returns 401 or 501 — it's idempotent. If the caller has no
+    // token (e.g. the session already expired), we still return 200 OK
+    // because the practical "logout" is the browser dropping its local token.
+    const res = await fetch(`${BASE_URL}/api/auth/logout`, { method: 'POST' });
+    const body = await res.json().catch(() => ({}));
+    const is200 = res.status === 200;
+    const honest = body.ok === true;
+    return {
+      passed: is200 && honest,
+      expected: '200 {ok: true} — logout never blocks the caller, even without a token',
+      actual: `status=${res.status}, ok=${body.ok}`,
+    };
+  });
+
+  // 8k. Auth credential validation
+  await assertTest('Auth Signup Rejects Malformed Email with 400', async () => {
+    const res = await fetch(`${BASE_URL}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'not-an-email', password: 'password123' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is400 = res.status === 400;
+    const honest = body.error === 'INVALID_EMAIL';
+    return {
+      passed: is400 && honest,
+      expected: '400 INVALID_EMAIL — malformed email rejected before reaching Supabase',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Auth Signup Rejects Short Password with 400', async () => {
+    const res = await fetch(`${BASE_URL}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'valid@example.com', password: 'short' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is400 = res.status === 400;
+    const honest = body.error === 'WEAK_PASSWORD';
+    return {
+      passed: is400 && honest,
+      expected: '400 WEAK_PASSWORD — under-8-char passwords rejected before reaching Supabase',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Auth Signup Rejects Missing Body Fields with 400', async () => {
+    const res = await fetch(`${BASE_URL}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'only@example.com' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is400 = res.status === 400;
+    const honest = body.error === 'INVALID_CREDENTIALS';
+    return {
+      passed: is400 && honest,
+      expected: '400 INVALID_CREDENTIALS — both email and password are required',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
   // 9. AI Status Probe Caching (60s TTL)
   await assertTest('Cache AI Status Probe Results (Within 60s TTL)', async () => {
     const start1 = Date.now();

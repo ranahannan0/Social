@@ -67,16 +67,40 @@ export async function executeWorkspaceImport(
     errors: [],
   };
 
-  // ── 1. Org via RPC (owner membership + settings row in one transaction) ──
-  const { data: orgId, error: orgErr } = await scoped.rpc('create_organization', {
-    p_name: mapped.workspaceName.slice(0, 120),
-    p_slug: slugify(mapped.workspaceName),
-    p_timezone: mapped.timezone,
-  });
-  if (orgErr || !orgId) {
-    throw new ImportExecutionError(`Organization creation failed: ${orgErr?.message ?? 'no id'}`);
+  // ── 1. Org: get-or-create (one org per user per design doc §12 decision 1)
+  //
+  // The create_organization RPC inserts a NEW org on every call. Without this
+  // pre-check, a user who clicks "Sync to Cloud" twice would end up with two
+  // duplicate orgs — and the frontend's hydrator (which only reads
+  // workspaces[0]) would show stale data from the first org while the user's
+  // latest sync sat unread in the second. Reuse the existing org when one
+  // exists; only call create_organization on first import.
+  let orgId: string | null = null;
+  {
+    const { data: existingOrgs, error: listErr } = await scoped
+      .from('organizations')
+      .select('id')
+      .order('created_at', { ascending: true })
+      .limit(1);
+    if (listErr) {
+      throw new ImportExecutionError(`Organization lookup failed: ${listErr.message}`);
+    }
+    if (existingOrgs && existingOrgs.length > 0) {
+      orgId = (existingOrgs[0] as { id: string }).id;
+      report.notes.push('Reused existing organization for this user.');
+    } else {
+      const { data: newOrgId, error: orgErr } = await scoped.rpc('create_organization', {
+        p_name: mapped.workspaceName.slice(0, 120),
+        p_slug: slugify(mapped.workspaceName),
+        p_timezone: mapped.timezone,
+      });
+      if (orgErr || !newOrgId) {
+        throw new ImportExecutionError(`Organization creation failed: ${orgErr?.message ?? 'no id'}`);
+      }
+      orgId = newOrgId as string;
+    }
   }
-  report.orgId = orgId as string;
+  report.orgId = orgId;
 
   // ── 2. Idempotency marker: has THIS export already been imported? ────────
   const { data: settingsRow } = await scoped

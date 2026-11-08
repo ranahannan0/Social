@@ -14,6 +14,8 @@ import {
   getStorageModeLabel,
   isSupabaseConfigured,
   requireSupabaseAuth,
+  requireSupabaseAuthWhenConfigured,
+  resolveAuthedUser,
   getAuthedUser,
   getUserScopedClient,
 } from './src/utils/supabaseServer';
@@ -109,6 +111,184 @@ app.use(
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   })
 );
+
+// ============================================================================
+// Authentication endpoints (Phase 2 frontend cutover — design doc §9)
+//
+// The browser NEVER talks to Supabase directly. Instead it posts credentials
+// here; the server uses supabase-js server-side to sign in / sign up, and
+// returns the JWT to the browser. The browser stores the JWT in sessionStorage
+// and sends it as `Authorization: Bearer <jwt>` on every subsequent /api call.
+//
+// All four routes are honest in local mode: 501 SUPABASE_UNAVAILABLE.
+// Rate limited 30/min per IP to throttle credential probing.
+// ============================================================================
+const authRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  // 30/min per IP: aggressive enough to throttle credential brute-force
+  // (one attempt every 2s) while leaving headroom for legitimate browser
+  // flows that fan out across signup/login/me/logout in quick succession.
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'RATE_LIMITED', message: 'Too many auth attempts. Try again in a minute.' },
+});
+
+interface AuthSignupBody {
+  email?: unknown;
+  password?: unknown;
+}
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
+/**
+ * Validates email + password shape. Email is checked structurally (not by RFC
+ * 5322 — Supabase GoTrue does the authoritative validation). Password must be
+ * >= 8 chars (Supabase default minimum).
+ */
+function validateAuthCredentials(body: unknown): { ok: true; email: string; password: string } | { ok: false; status: number; body: { error: string; message: string } } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, status: 400, body: { error: 'INVALID_BODY', message: 'Request body must be a JSON object.' } };
+  }
+  const b = body as AuthSignupBody;
+  if (!isNonEmptyString(b.email) || !isNonEmptyString(b.password)) {
+    return { ok: false, status: 400, body: { error: 'INVALID_CREDENTIALS', message: 'Email and password are required.' } };
+  }
+  const email = (b.email as string).trim().toLowerCase();
+  const password = b.password as string;
+  // Lightweight email shape check; GoTrue will reject anything stranger.
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { ok: false, status: 400, body: { error: 'INVALID_EMAIL', message: 'Email format is invalid.' } };
+  }
+  if (password.length < 8) {
+    return { ok: false, status: 400, body: { error: 'WEAK_PASSWORD', message: 'Password must be at least 8 characters.' } };
+  }
+  if (password.length > 256) {
+    return { ok: false, status: 400, body: { error: 'INVALID_PASSWORD', message: 'Password is too long.' } };
+  }
+  return { ok: true, email, password };
+}
+
+/**
+ * Returns a server-side supabase-js client configured with the anon key (no
+ * user JWT). Used by the auth signup/login routes to invoke GoTrue directly.
+ * Returns null when Supabase is not configured.
+ */
+async function getAnonClient(): Promise<import('@supabase/supabase-js').SupabaseClient | null> {
+  if (!isSupabaseConfigured()) return null;
+  const { createClient } = await import('@supabase/supabase-js');
+  return createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_ANON_KEY!, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+}
+
+app.post('/api/auth/signup', authRateLimiter, express.json({ limit: '8kb' }), async (req: Request, res: Response) => {
+  // Validate FIRST so malformed input is rejected with 400 regardless of
+  // storage mode — never reaches Supabase, never returns a confusing 501
+  // for what is actually a client-side error.
+  const parsed = validateAuthCredentials(req.body);
+  if (!parsed.ok) return res.status(parsed.status).json(parsed.body);
+  if (getStorageMode() !== 'supabase' || !isSupabaseConfigured()) {
+    return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Auth requires STORAGE_MODE=supabase.' });
+  }
+  try {
+    const client = await getAnonClient();
+    if (!client) return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+    const { data, error } = await client.auth.signUp({
+      email: parsed.email,
+      password: parsed.password,
+    });
+    if (error) {
+      // GoTrue errors: email already registered, weak password, etc.
+      return res.status(400).json({ error: 'SIGNUP_FAILED', message: error.message });
+    }
+    if (!data.session || !data.user) {
+      // Email confirmation required — return a partial response so the client
+      // can prompt the user to check their inbox.
+      return res.status(200).json({
+        user: { id: null, email: parsed.email },
+        session: null,
+        requiresEmailConfirmation: true,
+      });
+    }
+    return res.status(201).json({
+      user: { id: data.user.id, email: data.user.email ?? parsed.email },
+      session: {
+        accessToken: data.session.access_token,
+        expiresAt: data.session.expires_at ?? null,
+      },
+      requiresEmailConfirmation: false,
+    });
+  } catch (err) {
+    console.error('[auth:signup] failed:', err);
+    return res.status(500).json({ error: 'AUTH_FAILED', message: 'Signup failed server-side.' });
+  }
+});
+
+app.post('/api/auth/login', authRateLimiter, express.json({ limit: '8kb' }), async (req: Request, res: Response) => {
+  // Validate FIRST (same rationale as signup).
+  const parsed = validateAuthCredentials(req.body);
+  if (!parsed.ok) return res.status(parsed.status).json(parsed.body);
+  if (getStorageMode() !== 'supabase' || !isSupabaseConfigured()) {
+    return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Auth requires STORAGE_MODE=supabase.' });
+  }
+  try {
+    const client = await getAnonClient();
+    if (!client) return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+    const { data, error } = await client.auth.signInWithPassword({
+      email: parsed.email,
+      password: parsed.password,
+    });
+    if (error || !data.session || !data.user) {
+      return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Email or password is incorrect.' });
+    }
+    return res.status(200).json({
+      user: { id: data.user.id, email: data.user.email ?? parsed.email },
+      session: {
+        accessToken: data.session.access_token,
+        expiresAt: data.session.expires_at ?? null,
+      },
+    });
+  } catch (err) {
+    console.error('[auth:login] failed:', err);
+    return res.status(500).json({ error: 'AUTH_FAILED', message: 'Login failed server-side.' });
+  }
+});
+
+app.post('/api/auth/logout', authRateLimiter, async (req: Request, res: Response) => {
+  // Logout is intentionally idempotent: it NEVER returns 401 or 501. If the
+  // caller has a valid token, we sign it out server-side as a hygiene step;
+  // if not, we still return 200 OK because the practical "logout" is the
+  // browser dropping its local token anyway. This avoids confusing the
+  // frontend when a session has already expired.
+  try {
+    const user = await resolveAuthedUser(req);
+    if (user) {
+      const client = await getAnonClient();
+      if (client) {
+        // We don't have a refresh token (browser only stores access JWT), so
+        // signOut is a no-op on the network — but calling it is harmless.
+        await client.auth.signOut().catch(() => {});
+      }
+    }
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('[auth:logout] failed:', err);
+    return res.status(200).json({ ok: true }); // idempotent — never block logout
+  }
+});
+
+app.get('/api/auth/me', authRateLimiter, async (req: Request, res: Response) => {
+  // Reuses the same JWT verification path as requireSupabaseAuth, but returns
+  // the user shape instead of gating a downstream handler.
+  const user = await resolveAuthedUser(req);
+  if (!user) {
+    return res.status(401).json({ error: 'UNAUTHORIZED', message: 'Valid bearer token required.' });
+  }
+  return res.status(200).json({ user: { id: user.id, email: user.email } });
+});
 
 // ============================================================================
 // Workspace Import/Export (Phase 2 — design doc §8/§9)
@@ -639,9 +819,13 @@ app.get('/api/ai-status', aiStatusRateLimiter, async (req: Request, res: Respons
 });
 
 // API: Hardened Content Generation Endpoint
+// Auth-gated per design doc §9: in supabase mode a valid Supabase JWT is
+// required; in local mode the gate is a no-op (legacy behaviour, keeps the
+// integration test harness green).
 app.post(
   '/api/generate',
   generateRateLimiter,
+  requireSupabaseAuthWhenConfigured,
   validateGenerateRequest,
   async (req: Request, res: Response) => {
     const {

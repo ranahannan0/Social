@@ -71,3 +71,44 @@ export function isValidTimezone(tz: string): boolean {
     return false;
   }
 }
+
+/**
+ * Inverse of localNaiveToUtcIso: takes a UTC ISO instant and an IANA zone,
+ * returns the wall-clock `{ date: 'YYYY-MM-DD', time: 'HH:mm' }` as observed
+ * at that zone. Returns null when the input is malformed or the zone is
+ * unknown. Used by the workspace hydrator to map DB `scheduled_at` back into
+ * the frontend's naive CalendarEvent shape.
+ */
+export function utcIsoToLocalNaive(
+  utcIso: string,
+  tz: string
+): { date: string; time: string } | null {
+  let instant: number;
+  try {
+    instant = Date.parse(utcIso);
+    if (Number.isNaN(instant)) return null;
+  } catch {
+    return null;
+  }
+  try {
+    const dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit',
+    });
+    const parts = dtf.formatToParts(new Date(instant));
+    const get = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+    const year = get('year');
+    const month = get('month');
+    const day = get('day');
+    const hourRaw = get('hour');
+    // Intl can emit '24' for midnight in some environments; normalise.
+    const hour = hourRaw === '24' ? '00' : hourRaw;
+    const minute = get('minute');
+    if (!year || !month || !day || !hour || !minute) return null;
+    return { date: `${year}-${month}-${day}`, time: `${hour}:${minute}` };
+  } catch {
+    return null;
+  }
+}
