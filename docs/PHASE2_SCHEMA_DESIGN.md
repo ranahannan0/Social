@@ -1,7 +1,14 @@
 # OMNI CHANNEL PLUS — Phase 2 Database & Multi-Tenancy Design Proposal
 
 **Status:** APPROVED-BY-DEFAULT (user authorized Phase 2 start on 2026-11-08) — §12 decisions adopted on the marked recommendations (auto-created org per user, brand_voice JSONB now, append-only compliance history, server-only DB access, demo seed). Implemented as migrations `supabase/migrations/0001`–`0006`.
-**Local verification:** SQL applies cleanly on PostgreSQL 16.4; **30/30 cross-tenant RLS isolation assertions pass** (`npm run test:db`, mock auth shim). Supabase-specific integration (real auth.users behavior, connection pooling, service-role semantics) remains **untested until Supabase credentials are provided**.
+**Local verification:** SQL applies cleanly on PostgreSQL 16.4; **39/39 DB assertions pass** (`npm run test:db`: 30 RLS isolation + 9 import-mapper-vs-real-schema). Supabase-specific integration (real auth.users behavior, connection pooling, supabase-js executor over HTTP) remains **untested until Supabase credentials are provided**.
+
+**Implementation status (2026-11-08, commit 90ebbdf):**
+- §4 schema + §6 RLS: DONE (migrations 0001–0006)
+- §8 step 1 export-first: DONE — works in both storage modes (Settings → Data & Backup)
+- §8 step 2 import: mapper + DB path DONE and verified locally; supabase-js executor written, HTTP-run pending credentials
+- §9 server authorization layer: DONE (JWT middleware, user-scoped clients, rate-limited workspace endpoints, honest 501 in local mode)
+- §10 cross-tenant tests: DONE at DB level (§10 items 1–5 automated; HTTP-level re-run pending credentials); §10 item 6 (naive-date round-trip) automated and passing
 **Branch context:** `dev/phase1-stabilization` (Phase 1 verified; upstream `a8c68ed` reconciled).
 **Governing rule:** design before SQL — this document was reviewed and amended during implementation (fixes: helper EXECUTE grants, append-only privilege revocations ordered after grants, last-owner guard skips FK cascades via `pg_trigger_depth()`).
 
