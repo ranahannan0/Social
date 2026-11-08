@@ -12,7 +12,8 @@
     "lint": "tsc --noEmit",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "node --import tsx --test tests/unit/dateUtils.test.ts tests/unit/dataIntegrity.test.ts",
-    "test:integration": "tsx tests/runIntegration.ts"
+    "test:integration": "tsx tests/runIntegration.ts",
+    "test:db": "node scripts/db/runLocal.mjs"
   },
   "dependencies": {
     "@google/genai": "^3.0.0",
@@ -29,15 +30,16 @@
     "vite": "^8.3.0"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "pg": "^8.23.1",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "typescript": "^7.0.2",
-    "@types/express": "^4.17.21"
+    "typescript": "^7.0.2"
   },
   "trustedDependencies": [
     "protobufjs"

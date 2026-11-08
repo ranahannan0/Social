@@ -1,8 +1,9 @@
 # OMNI CHANNEL PLUS — Phase 2 Database & Multi-Tenancy Design Proposal
 
-**Status:** DESIGN PROPOSAL — awaiting review. No SQL has been applied anywhere.
-**Branch context:** `dev/phase1-stabilization` @ `2ecc9b4` (Phase 1 verified; upstream `a8c68ed` reconciled).
-**Governing rule:** design before SQL (master development order). Actual migration files are written only after this document is approved or amended.
+**Status:** APPROVED-BY-DEFAULT (user authorized Phase 2 start on 2026-11-08) — §12 decisions adopted on the marked recommendations (auto-created org per user, brand_voice JSONB now, append-only compliance history, server-only DB access, demo seed). Implemented as migrations `supabase/migrations/0001`–`0006`.
+**Local verification:** SQL applies cleanly on PostgreSQL 16.4; **30/30 cross-tenant RLS isolation assertions pass** (`npm run test:db`, mock auth shim). Supabase-specific integration (real auth.users behavior, connection pooling, service-role semantics) remains **untested until Supabase credentials are provided**.
+**Branch context:** `dev/phase1-stabilization` (Phase 1 verified; upstream `a8c68ed` reconciled).
+**Governing rule:** design before SQL — this document was reviewed and amended during implementation (fixes: helper EXECUTE grants, append-only privilege revocations ordered after grants, last-owner guard skips FK cascades via `pg_trigger_depth()`).
 
 ---
 
