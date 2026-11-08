@@ -3,7 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { CalendarEvent, PlatformType } from '../../types';
 import { PLATFORMS_CONFIG } from '../../services/constants';
 import { PlatformIcon } from '../common/PlatformIcon';
-import { addDaysToDateString, getCalendarDateInTimeZone, getDateStringInTimeZone, getIanaTimeZone, getLocalDateString } from '../../utils/dateUtils';
+import { getCalendarDateInTimeZone, getDateStringInTimeZone, getIanaTimeZone, getLocalDateString } from '../../utils/dateUtils';
 import {
   CalendarDays,
   ChevronLeft,
@@ -118,7 +118,7 @@ export const ContentCalendarView: React.FC = () => {
     setNewEvent({
       title: '',
       platform: 'linkedin',
-      date: getLocalDateString(new Date()),
+      date: getDateStringInTimeZone(new Date(), workspaceTimeZone),
       time: '10:00',
       status: 'scheduled',
       summary: '',
