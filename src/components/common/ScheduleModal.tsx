@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Calendar, Clock, X, Check } from 'lucide-react';
 import { ContentDraft } from '../../types';
 import { useApp } from '../../context/AppContext';
+import { addDaysToDateString, getDateStringInTimeZone, getIanaTimeZone } from '../../utils/dateUtils';
 
 interface ScheduleModalProps {
   draft: ContentDraft;
@@ -16,15 +17,18 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({
   onClose,
   onScheduledSuccess,
 }) => {
-  const { scheduleDraft } = useApp();
-
-  // Tomorrow as default date
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const defaultDateStr = tomorrow.toISOString().split('T')[0];
+  const { scheduleDraft, settings } = useApp();
+  const workspaceTimeZone = getIanaTimeZone(settings.timezone);
+  const defaultDateStr = addDaysToDateString(getDateStringInTimeZone(new Date(), workspaceTimeZone), 1);
 
   const [date, setDate] = useState(draft.scheduledDate ? draft.scheduledDate.split('T')[0] : defaultDateStr);
   const [time, setTime] = useState(draft.scheduledDate && draft.scheduledDate.includes('T') ? draft.scheduledDate.split('T')[1].slice(0, 5) : '10:00');
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setDate(draft.scheduledDate ? draft.scheduledDate.split('T')[0] : defaultDateStr);
+    setTime(draft.scheduledDate && draft.scheduledDate.includes('T') ? draft.scheduledDate.split('T')[1].slice(0, 5) : '10:00');
+  }, [isOpen, draft.id, draft.scheduledDate, defaultDateStr]);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!isOpen) return null;
@@ -81,7 +85,7 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({
             <div>
               <label className="block text-xs font-medium text-zinc-400 mb-1.5 flex items-center gap-1.5">
                 <Clock className="w-3.5 h-3.5 text-zinc-500" />
-                <span>Target Time</span>
+                <span>Target Time ({workspaceTimeZone})</span>
               </label>
               <input
                 type="time"
