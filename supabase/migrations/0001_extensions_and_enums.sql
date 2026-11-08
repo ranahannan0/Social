@@ -6,10 +6,13 @@
 -- encoded in can_read/can_write/can_admin helpers (0005), not by enum order.
 CREATE TYPE public.org_role AS ENUM ('viewer', 'editor', 'admin', 'owner');
 
--- Phase 1 uses 'ready' and 'scheduled'. 'published'/'archived' are reserved
--- for Phase 4 (platform publishing) — columns accept them only when that
--- phase actually writes them. No fake states.
-CREATE TYPE public.draft_status AS ENUM ('ready', 'scheduled', 'published', 'archived');
+-- Phase 1 drafts carry 'draft' (studio saves + seeds), 'ready', 'scheduled'.
+-- 'published'/'archived' are reserved for Phase 4 (platform publishing) —
+-- columns accept them only when that phase actually writes them. No fake
+-- states. (Amended pre-deployment: Phase 1 usage of 'draft' verified in
+-- constants.ts seeds and ContentStudioView save path; local DBs are
+-- recreated per run, so no persistent environment ever applied the old set.)
+CREATE TYPE public.draft_status AS ENUM ('draft', 'ready', 'scheduled', 'published', 'archived');
 
 -- Matches Phase 1 CalendarEvent statuses.
 CREATE TYPE public.event_status AS ENUM ('draft', 'scheduled', 'published', 'cancelled');

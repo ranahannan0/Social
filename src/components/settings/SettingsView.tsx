@@ -15,7 +15,9 @@ import {
   Share2,
   Radio,
   ExternalLink,
+  Download,
 } from 'lucide-react';
+import { downloadWorkspaceExport } from '../../utils/workspaceExport';
 
 export const SettingsView: React.FC = () => {
   const { settings, updateSettings, brands, resetToDemoData } = useApp();
@@ -25,6 +27,20 @@ export const SettingsView: React.FC = () => {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [resetSuccess, setResetSuccess] = useState(false);
   const [isConfirmingReset, setIsConfirmingReset] = useState(false);
+  const [exportMsg, setExportMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const handleExportBackup = () => {
+    try {
+      const { fileName, counts } = downloadWorkspaceExport();
+      setExportMsg({
+        ok: true,
+        text: `Backup downloaded: ${fileName} (${counts.brands} brands, ${counts.drafts} drafts, ${counts.events} events).`,
+      });
+    } catch (err: any) {
+      setExportMsg({ ok: false, text: err?.message || 'Export failed.' });
+    }
+    setTimeout(() => setExportMsg(null), 6000);
+  };
 
   // Active subtab: 'app' | 'ai' | 'supabase' | 'integrations'
   const [activeTab, setActiveTab] = useState<'app' | 'ai' | 'supabase' | 'integrations'>('app');
@@ -243,6 +259,40 @@ export const SettingsView: React.FC = () => {
                 </div>
               </label>
             </div>
+          </div>
+
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+            <div className="border-b border-zinc-800 pb-3">
+              <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                <Download className="w-4 h-4 text-emerald-400" />
+                Data &amp; Backup
+              </h3>
+              <p className="text-xs text-zinc-500">
+                Download a full backup of your workspace (brands, drafts, calendar events,
+                settings). Import into the Phase 2 database is available once the workspace is
+                connected to Supabase — this export is the migration file.
+              </p>
+            </div>
+            {exportMsg && (
+              <div
+                className={`p-3 rounded-xl text-xs flex items-center gap-2 animate-in fade-in ${
+                  exportMsg.ok
+                    ? 'bg-emerald-950/60 border border-emerald-900/60 text-emerald-300'
+                    : 'bg-red-950/60 border border-red-900/60 text-red-300'
+                }`}
+              >
+                {exportMsg.ok ? <Check className="w-4 h-4 text-emerald-400" /> : <AlertCircle className="w-4 h-4 text-red-400" />}
+                <span>{exportMsg.text}</span>
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={handleExportBackup}
+              className="flex items-center gap-2 px-4 py-2 bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 rounded-lg text-xs font-medium text-zinc-200 transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Export Backup (JSON)
+            </button>
           </div>
 
           <div className="flex items-center justify-end gap-3">

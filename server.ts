@@ -7,6 +7,16 @@ import { fileURLToPath } from 'url';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { resolveTrustProxyHops } from './src/utils/proxy';
+import { mapWorkspaceImport } from './src/utils/workspaceImportMapper';
+import { executeWorkspaceImport, ImportExecutionError } from './src/utils/workspaceImportExec';
+import {
+  getStorageMode,
+  getStorageModeLabel,
+  isSupabaseConfigured,
+  requireSupabaseAuth,
+  getAuthedUser,
+  getUserScopedClient,
+} from './src/utils/supabaseServer';
 
 dotenv.config();
 
@@ -98,6 +108,91 @@ app.use(
     xContentTypeOptions: true,
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   })
+);
+
+// ============================================================================
+// Workspace Import/Export (Phase 2 — design doc §8/§9)
+// Registered BEFORE the global 64kb parser so the import route can carry its
+// own 2MB limit (backup files exceed 64kb with real content).
+// Both endpoints are auth-gated: 501 in local mode (honest, actionable),
+// 401 without a valid Supabase bearer token, 10 req/min per IP.
+// ============================================================================
+const workspaceRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'RATE_LIMITED', message: 'Too many workspace operations. Try again in a minute.' },
+});
+
+// Export the user's database workspace (for automation/backup pipelines).
+app.get('/api/workspace/export', workspaceRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const user = getAuthedUser(req);
+    const scoped = await getUserScopedClient(user.token);
+    if (!scoped) {
+      return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+    }
+    const orgs = (await scoped.from('organizations').select('*')).data ?? [];
+    const workspaces = [];
+    for (const org of orgs as Array<Record<string, unknown>>) {
+      const orgId = org.id as string;
+      const [brands, drafts, events, settings] = await Promise.all([
+        scoped.from('brands').select('*').eq('org_id', orgId),
+        scoped.from('content_drafts').select('*').eq('org_id', orgId),
+        scoped.from('calendar_events').select('*').eq('org_id', orgId),
+        scoped.from('organization_settings').select('*').eq('org_id', orgId).maybeSingle(),
+      ]);
+      workspaces.push({
+        organization: org,
+        brands: brands.data ?? [],
+        drafts: drafts.data ?? [],
+        calendarEvents: events.data ?? [],
+        settings: settings.data ?? null,
+      });
+    }
+    return res.json({
+      formatVersion: 1,
+      exportedAt: new Date().toISOString(),
+      source: 'database',
+      workspaces,
+    });
+  } catch (err) {
+    console.error('[workspace:export] failed:', err);
+    return res.status(500).json({ error: 'EXPORT_FAILED', message: 'Workspace export failed server-side.' });
+  }
+});
+
+// Import a localStorage backup file into a NEW organization for the caller.
+app.post(
+  '/api/workspace/import',
+  workspaceRateLimiter,
+  express.json({ limit: '2mb' }),
+  requireSupabaseAuth,
+  async (req: Request, res: Response) => {
+    try {
+      const user = getAuthedUser(req);
+      const mapped = mapWorkspaceImport(req.body, {});
+      if (!mapped.ok) {
+        return res.status(400).json({ error: 'INVALID_EXPORT', errors: mapped.errors });
+      }
+      const scoped = await getUserScopedClient(user.token);
+      if (!scoped) {
+        return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+      }
+      const exportedAt = typeof req.body?.exportedAt === 'string' ? req.body.exportedAt : new Date().toISOString();
+      const report = await executeWorkspaceImport(scoped, mapped.value, exportedAt);
+      // 207 = partial success (rows created AND per-row errors reported)
+      const status = report.errors.length > 0 ? 207 : 201;
+      return res.status(status).json(report);
+    } catch (err) {
+      if (err instanceof ImportExecutionError) {
+        return res.status(422).json({ error: 'IMPORT_FAILED', message: err.message, detail: err.detail });
+      }
+      console.error('[workspace:import] failed:', err);
+      return res.status(500).json({ error: 'IMPORT_FAILED', message: 'Workspace import failed server-side.' });
+    }
+  }
 );
 
 // Security: Reduce JSON request body size limit to 64kb (appropriate for text-only inputs)
@@ -457,14 +552,15 @@ function validateGenerateRequest(req: Request, res: Response, next: NextFunction
 
 // API: Health check
 app.get('/api/health', (req: Request, res: Response) => {
+  const supabaseMode = getStorageMode() === 'supabase' && isSupabaseConfigured();
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     aiConfigured: isKeyConfigured,
     model: configuredModel,
-    version: '2.0-phase1',
-    storageMode: 'localStorage_demo',
-    supabaseReady: false,
+    version: '2.0-phase2-db',
+    storageMode: getStorageModeLabel(),
+    supabaseReady: supabaseMode,
     trustProxyHops: configuredTrustProxyHops,
   });
 });

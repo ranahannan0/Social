@@ -11,12 +11,13 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "npm run test:unit && npm run test:integration",
-    "test:unit": "node --import tsx --test tests/unit/dateUtils.test.ts tests/unit/dataIntegrity.test.ts",
+    "test:unit": "node --import tsx --test tests/unit/tzConvert.test.ts tests/unit/workspaceImportMapper.test.ts tests/unit/workspaceExport.test.ts tests/unit/dateUtils.test.ts tests/unit/dataIntegrity.test.ts",
     "test:integration": "tsx tests/runIntegration.ts",
     "test:db": "node scripts/db/runLocal.mjs"
   },
   "dependencies": {
     "@google/genai": "^3.0.0",
+    "@supabase/supabase-js": "^2.119.0",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
     "dotenv": "^17.2.3",
@@ -32,6 +33,7 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",

@@ -29,6 +29,7 @@
  * 8f-2. Rescheduling purges pre-existing duplicate events (pure unit)
  * 8g. Neutral empty compliance statistics (pure unit)
  * 8h. Editorial pass rate strictly over evaluated drafts (pure unit)
+ * 8i. Workspace endpoints honest 501 in local storage mode
  * 9. AI status caching within 60-second TTL
  * 10. Valid labelled fallback response generation & schema compliance
  * 11. Generation rate limiting (429 at >10 req/min)
@@ -457,6 +458,35 @@ async function runAllTests(): Promise<boolean> {
       passed: is50Percent && hasEvaluated,
       expected: 'compliancePassRate is 50% (1/2 evaluated drafts) and hasEvaluatedContent is true',
       actual: `passRate=${stats.compliancePassRate}, hasEvaluated=${stats.hasEvaluatedContent}`,
+    };
+  });
+
+  // 8i. Workspace endpoints: honest 501 in LOCAL storage mode (no auth header)
+  await assertTest('Workspace Export Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/workspace/export`);
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL' && body.storageMode === 'localStorage_demo';
+    return {
+      passed: is501 && honest,
+      expected: '501 with STORAGE_MODE_LOCAL + storageMode localStorage_demo (no fake supabase claims)',
+      actual: `status=${res.status}, error=${body.error}, storageMode=${body.storageMode}`,
+    };
+  });
+
+  await assertTest('Workspace Import Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/workspace/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ formatVersion: 1 }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — import requires Supabase mode, never a silent fake success',
+      actual: `status=${res.status}, error=${body.error}`,
     };
   });
 

@@ -86,10 +86,17 @@ async function main() {
   await db.end();
 
   const { spawnSync } = await import('node:child_process');
-  const r = spawnSync(process.execPath,
+  // Phase A: RLS isolation suite (JS, no TS imports)
+  const r1 = spawnSync(process.execPath,
     [join(ROOT, 'supabase/tests/isolation.test.mjs'), conn],
     { stdio: 'inherit' });
-  process.exit(r.status ?? 1);
+  if (r1.status !== 0) process.exit(r1.status ?? 1);
+
+  // Phase B: import-mapper → real-schema suite (TS imports via tsx)
+  const r2 = spawnSync(process.execPath,
+    ['--import', 'tsx', join(ROOT, 'supabase/tests/importMapper.db.test.ts'), conn],
+    { stdio: 'inherit' });
+  process.exit(r2.status ?? 1);
 }
 
 main().catch(e => { console.error('RUNNER ERROR:', e.message); process.exit(1); });
