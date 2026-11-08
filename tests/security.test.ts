@@ -24,6 +24,7 @@ import {
   calculateComplianceStats,
 } from '../src/utils/dataIntegrity';
 import { BrandProfile, ContentDraft, CalendarEvent } from '../src/types';
+import { addDaysToDateString, getCalendarDateInTimeZone, getDateStringInTimeZone, getIanaTimeZone, getLocalDateString } from '../src/utils/dateUtils';
 
 const BASE_URL = process.env.TEST_URL || 'http://localhost:3000';
 
@@ -242,6 +243,40 @@ async function runAllTests() {
       passed: allPassed,
       expected: 'Strict numeric parsing: 0 for undefined/empty/true/negative/invalid, numeric N for valid integers',
       actual: `default=${checkDefault}, true=${checkTrue}, negative=${checkNegative}, 1=${checkHop1}, 2=${checkHop2}`,
+    };
+  });
+
+  // 8b-1. Calendar Date Conversion Across Workspace Timezones
+  await assertTest('Calendar Dates Respect the Selected Workspace Timezone', async () => {
+    const boundaryInstant = new Date('2026-11-08T20:30:00.000Z');
+    const karachiDate = getDateStringInTimeZone(boundaryInstant, 'Asia/Karachi');
+    const newYorkDate = getDateStringInTimeZone(boundaryInstant, 'America/New_York');
+    const calendarDate = getCalendarDateInTimeZone(boundaryInstant, 'Asia/Karachi');
+    const calendarDateString = getLocalDateString(calendarDate);
+
+    const passed =
+      karachiDate === '2026-11-09' &&
+      newYorkDate === '2026-11-08' &&
+      calendarDateString === '2026-11-09';
+
+    return {
+      passed,
+      expected: 'Same instant maps to 2026-11-09 in Asia/Karachi and 2026-11-08 in America/New_York; calendar date matches Karachi',
+      actual: `Karachi=${karachiDate}, NewYork=${newYorkDate}, calendarDate=${calendarDateString}`,
+    };
+  });
+
+  // 8b-2. Workspace Timezone Labels and DST-Safe Date Arithmetic
+  await assertTest('Parse Workspace Timezone Labels and Add Calendar Days Safely', async () => {
+    const timezone = getIanaTimeZone('Asia/Karachi (PKT, UTC+5)');
+    const leapDay = addDaysToDateString('2028-02-28', 1);
+    const nextMonth = addDaysToDateString('2026-12-31', 1);
+    const passed = timezone === 'Asia/Karachi' && leapDay === '2028-02-29' && nextMonth === '2027-01-01';
+
+    return {
+      passed,
+      expected: 'Timezone label resolves to Asia/Karachi; leap-year and year-boundary date arithmetic is correct',
+      actual: `timezone=${timezone}, leapDay=${leapDay}, nextMonth=${nextMonth}`,
     };
   });
 

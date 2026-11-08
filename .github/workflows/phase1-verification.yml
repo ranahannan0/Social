@@ -1,0 +1,93 @@
+name: Phase 1 verification
+
+on:
+  push:
+    branches:
+      - phase1/verification-run
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Lint, build, and isolated regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PORT: "4317"
+      TEST_URL: http://127.0.0.1:4317
+      GEMINI_API_KEY: MY_GEMINI_API_KEY
+      TRUST_PROXY_HOPS: "0"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: TypeScript lint
+        run: bun run lint
+
+      - name: Production build
+        run: bun run build
+
+      - name: Start isolated demo server and run regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NODE_ENV=development
+
+          bun run dev > /tmp/omni-phase1-server.log 2>&1 &
+          SERVER_PID=$!
+
+          cleanup() {
+            kill "$SERVER_PID" 2>/dev/null || true
+            wait "$SERVER_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail "$TEST_URL/api/health" >/dev/null; then
+              ready=1
+              break
+            fi
+
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "Server exited before becoming ready."
+              cat /tmp/omni-phase1-server.log
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo "Server did not become ready within 60 seconds."
+            cat /tmp/omni-phase1-server.log
+            exit 1
+          fi
+
+          echo "Isolated server health:"
+          curl --silent --show-error --fail "$TEST_URL/api/health"
+          echo
+
+          bun run tests/security.test.ts
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-server-log
+          path: /tmp/omni-phase1-server.log
+          if-no-files-found: ignore
