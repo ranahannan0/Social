@@ -23,6 +23,7 @@ import {
   User,
   Cloud,
   CloudOff,
+  CloudCog,
 } from 'lucide-react';
 import { downloadWorkspaceExport } from '../../utils/workspaceExport';
 
@@ -38,6 +39,8 @@ export const SettingsView: React.FC = () => {
     lastSyncSummary,
     hydrationStatus,
     hydrationError,
+    syncState,
+    retryPendingSync,
   } = useApp();
   const { user, signOut } = useAuth();
 
@@ -488,7 +491,58 @@ export const SettingsView: React.FC = () => {
             </div>
           </div>
 
-          {/* Sync to Cloud */}
+          {/* Auto-sync (Stage B) */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                  <CloudCog className="w-4 h-4 text-zinc-400" />
+                  <span>Auto-sync</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold">STAGE B · LIVE</span>
+                </h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  Every create, edit and delete saves to the cloud automatically — no button needed.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {syncState.pending > 0 ? (
+                  <span className="text-xs px-3 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300 font-medium flex items-center gap-1.5">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    {syncState.pending} pending
+                  </span>
+                ) : (
+                  <span className="text-xs px-3 py-1.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 font-medium flex items-center gap-1.5">
+                    <Check className="w-3.5 h-3.5" />
+                    All saved
+                  </span>
+                )}
+                {syncState.pending > 0 && (
+                  <button
+                    type="button"
+                    onClick={retryPendingSync}
+                    className="text-xs px-3 py-1.5 rounded-md border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors"
+                  >
+                    Retry
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {syncState.lastError && (
+              <div className="text-xs flex items-start gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-300">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <div className="font-medium">A change could not be saved to the cloud</div>
+                  <div className="mt-0.5 text-red-400/90">{syncState.lastError}</div>
+                  <div className="mt-1 text-zinc-400">
+                    Pending changes retry automatically. “Full sync” below can also repair everything.
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Sync to Cloud (full repair) */}
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
@@ -497,7 +551,7 @@ export const SettingsView: React.FC = () => {
                   <span>Sync to Cloud</span>
                 </h3>
                 <p className="text-xs text-zinc-500 mt-1">
-                  Push your current local edits ({brands.length} brands) to the cloud. Already-synced items are skipped (idempotent).
+                  Full workspace push ({brands.length} brands): creates anything missing in the cloud, skips what matches (idempotent). Use it to repair after errors — daily editing needs no button.
                 </p>
               </div>
               <button
@@ -510,7 +564,7 @@ export const SettingsView: React.FC = () => {
                 className="text-xs px-3.5 py-2 rounded-md bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
               >
                 {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5" />}
-                {syncing ? 'Syncing…' : 'Sync now'}
+                {syncing ? 'Syncing…' : 'Full sync (repair)'}
               </button>
             </div>
 

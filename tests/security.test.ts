@@ -526,6 +526,35 @@ async function runAllTests(): Promise<boolean> {
     };
   });
 
+  // 8k. Stage B CRUD endpoints: honest 501 in LOCAL storage mode
+  // The per-resource sync routes (/api/brands, /api/drafts, /api/events) must
+  // behave exactly like the workspace routes when Supabase is not configured:
+  // 501 STORAGE_MODE_LOCAL, never a silent fake success.
+  const crudProbes: Array<{ name: string; path: string; method: string; body?: unknown }> = [
+    { name: 'CRUD Brand Create Returns Honest 501 In Local Mode', path: '/api/brands', method: 'POST', body: { name: 'Probe' } },
+    { name: 'CRUD Brand Update Returns Honest 501 In Local Mode', path: '/api/brands/11111111-1111-1111-1111-111111111111', method: 'PATCH', body: { tagline: 'x' } },
+    { name: 'CRUD Brand Delete Returns Honest 501 In Local Mode', path: '/api/brands/11111111-1111-1111-1111-111111111111', method: 'DELETE' },
+    { name: 'CRUD Draft Create Returns Honest 501 In Local Mode', path: '/api/drafts', method: 'POST', body: { title: 't', topic: 'x', platform: 'linkedin', brandId: '11111111-1111-1111-1111-111111111111' } },
+    { name: 'CRUD Event Delete Returns Honest 501 In Local Mode', path: '/api/events/11111111-1111-1111-1111-111111111111', method: 'DELETE' },
+  ];
+  for (const probe of crudProbes) {
+    await assertTest(probe.name, async () => {
+      const res = await fetch(`${BASE_URL}${probe.path}`, {
+        method: probe.method,
+        headers: { 'Content-Type': 'application/json' },
+        ...(probe.body !== undefined ? { body: JSON.stringify(probe.body) } : {}),
+      });
+      const body = await res.json().catch(() => ({}));
+      const is501 = res.status === 501;
+      const honest = body.error === 'STORAGE_MODE_LOCAL';
+      return {
+        passed: is501 && honest,
+        expected: `501 STORAGE_MODE_LOCAL for ${probe.method} ${probe.path} in local mode`,
+        actual: `status=${res.status}, error=${body.error}`,
+      };
+    });
+  }
+
   await assertTest('Auth Me Returns 401 Without Bearer Token', async () => {
     // In local mode, /me still returns 401 (not 501) because the gate is
     // "no token = unauthorized" regardless of storage mode — the route is

@@ -21,6 +21,7 @@ import {
   fetchMe,
   hasValidSession,
 } from '../services/authClient';
+import { resetSyncQueue } from '../services/cloudSync';
 
 interface AuthContextType {
   user: AuthUser | null;
@@ -93,6 +94,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signOut = useCallback(async () => {
     await clientSignOut();
+    // Pending Stage-B sync tasks belong to the outgoing session — replaying
+    // them under a different account would cross workspaces.
+    resetSyncQueue();
     setUser(null);
     setAuthError(null);
   }, []);

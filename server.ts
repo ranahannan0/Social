@@ -10,6 +10,12 @@ import { resolveTrustProxyHops } from './src/utils/proxy';
 import { mapWorkspaceImport } from './src/utils/workspaceImportMapper';
 import { executeWorkspaceImport, ImportExecutionError } from './src/utils/workspaceImportExec';
 import {
+  mapBrandPayload,
+  mapDraftPayload,
+  mapEventPayload,
+  CrudValidationError,
+} from './src/utils/crudMappers';
+import {
   getStorageMode,
   getStorageModeLabel,
   isSupabaseConfigured,
@@ -18,6 +24,7 @@ import {
   resolveAuthedUser,
   getAuthedUser,
   getUserScopedClient,
+  resolveUserOrgContext,
 } from './src/utils/supabaseServer';
 
 dotenv.config();
@@ -377,6 +384,311 @@ app.post(
 
 // Security: Reduce JSON request body size limit to 64kb (appropriate for text-only inputs)
 app.use(express.json({ limit: '64kb' }));
+
+// ============================================================================
+// Per-resource CRUD (Stage B — real-time sync on mutation, design doc §8b)
+//
+// The browser no longer waits for a manual "Sync now": every create/update/
+// delete lands here within moments of the user's action. Security posture is
+// identical to the workspace routes:
+// - 501 STORAGE_MODE_LOCAL in local mode (honest, actionable)
+// - 401 without a valid Supabase bearer token
+// - every query runs through a USER-SCOPED client so RLS is exercised for
+//   real, PLUS explicit org scoping (defense in depth)
+// - payloads validated by src/utils/crudMappers.ts (pure, unit-tested)
+//   BEFORE any DB access — client errors are clean 400s, never 23514s
+// - UPDATE/DELETE pin org_id; 0 affected rows → 404 (never another tenant's
+//   row, even when the id is known — the cross-tenant probe in the audit
+//   smoke asserts exactly this)
+// ============================================================================
+const crudRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  // Human editing cadence with headroom for batch operations (workspace
+  // reset enqueues one delete per brand). Well above any manual rate.
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'RATE_LIMITED', message: 'Too many sync operations. Try again in a minute.' },
+});
+
+const UUID_PARAM_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+interface CrudDeps {
+  scoped: NonNullable<Awaited<ReturnType<typeof getUserScopedClient>>>;
+  orgId: string;
+  orgTimezone: string;
+}
+
+async function prepareCrud(req: Request, res: Response): Promise<CrudDeps | null> {
+  const user = getAuthedUser(req);
+  const scoped = await getUserScopedClient(user.token);
+  if (!scoped) {
+    res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+    return null;
+  }
+  const orgCtx = await resolveUserOrgContext(scoped);
+  if (!orgCtx) {
+    res.status(409).json({
+      error: 'NO_WORKSPACE',
+      message: 'No cloud workspace exists for this account yet. Open the app once to bootstrap it, then retry.',
+    });
+    return null;
+  }
+  return { scoped, orgId: orgCtx.orgId, orgTimezone: orgCtx.timezone };
+}
+
+function crudError(res: Response, err: unknown): Response {
+  if (err instanceof CrudValidationError) {
+    return res.status(400).json({ error: 'INVALID_ENTITY', errors: err.issues });
+  }
+  console.error('[crud] failed:', err);
+  return res.status(500).json({ error: 'CRUD_FAILED', message: 'Cloud sync operation failed server-side.' });
+}
+
+// ── Brands ──────────────────────────────────────────────────────────────────
+app.post('/api/brands', crudRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const deps = await prepareCrud(req, res);
+    if (!deps) return;
+    const { row, notes } = mapBrandPayload(req.body, { orgId: deps.orgId, mode: 'create' });
+    const { data, error } = await deps.scoped.from('brands').insert(row).select('*').single();
+    if (error || !data) {
+      return res.status(422).json({ error: 'BRAND_CREATE_FAILED', message: error?.message ?? 'no row returned', notes });
+    }
+    return res.status(201).json(data);
+  } catch (err) {
+    return crudError(res, err);
+  }
+});
+
+app.patch('/api/brands/:id', crudRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!UUID_PARAM_RE.test(id)) {
+      return res.status(400).json({ error: 'INVALID_ID', message: 'Brand id must be a UUID.' });
+    }
+    const deps = await prepareCrud(req, res);
+    if (!deps) return;
+    const { row, notes } = mapBrandPayload(req.body, { mode: 'update' });
+    const { data, error } = await deps.scoped
+      .from('brands')
+      .update(row)
+      .eq('id', id)
+      .eq('org_id', deps.orgId)
+      .select('*')
+      .single();
+    if (error || !data) {
+      const notFound = !error || error.code === 'PGRST116';
+      if (notFound) return res.status(404).json({ error: 'NOT_FOUND', message: 'Brand not found in your workspace.' });
+      return res.status(422).json({ error: 'BRAND_UPDATE_FAILED', message: error?.message ?? 'no row returned', notes });
+    }
+    return res.status(200).json(data);
+  } catch (err) {
+    return crudError(res, err);
+  }
+});
+
+app.delete('/api/brands/:id', crudRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!UUID_PARAM_RE.test(id)) {
+      return res.status(400).json({ error: 'INVALID_ID', message: 'Brand id must be a UUID.' });
+    }
+    const deps = await prepareCrud(req, res);
+    if (!deps) return;
+    // DB FKs cascade: drafts, events, checks and jobs references go with it.
+    const { data, error } = await deps.scoped
+      .from('brands')
+      .delete()
+      .eq('id', id)
+      .eq('org_id', deps.orgId)
+      .select('id');
+    if (error) {
+      return res.status(422).json({ error: 'BRAND_DELETE_FAILED', message: error.message });
+    }
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'Brand not found in your workspace.' });
+    }
+    return res.status(200).json({ ok: true, id });
+  } catch (err) {
+    return crudError(res, err);
+  }
+});
+
+// ── Drafts ──────────────────────────────────────────────────────────────────
+app.post('/api/drafts', crudRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const deps = await prepareCrud(req, res);
+    if (!deps) return;
+    const { row, notes } = mapDraftPayload(req.body, { orgId: deps.orgId, orgTimezone: deps.orgTimezone, mode: 'create' });
+    const { compliance, ...draftRow } = row;
+    const { data, error } = await deps.scoped.from('content_drafts').insert(draftRow).select('*').single();
+    if (error || !data) {
+      return res.status(422).json({ error: 'DRAFT_CREATE_FAILED', message: error?.message ?? 'no row returned', notes });
+    }
+    // Append-only editorial check (best effort — a check failure must not
+    // fail the draft that was already created).
+    let checkCreated = false;
+    if (compliance) {
+      const { error: checkErr } = await deps.scoped.from('compliance_checks').insert({
+        org_id: deps.orgId,
+        draft_id: (data as { id: string }).id,
+        provider: 'rule_local',
+        passed: compliance.passed,
+        detected_fluff: compliance.detected_fluff,
+        char_count: compliance.char_count,
+        max_limit: compliance.max_limit,
+        warnings: compliance.warnings,
+        check_version: compliance.check_version,
+      });
+      checkCreated = !checkErr;
+      if (checkErr) notes.push(`compliance check not stored: ${checkErr.message}`);
+    }
+    return res.status(201).json({ ...(data as object), ...(checkCreated || notes.length ? { checkCreated, notes } : {}) });
+  } catch (err) {
+    return crudError(res, err);
+  }
+});
+
+app.patch('/api/drafts/:id', crudRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!UUID_PARAM_RE.test(id)) {
+      return res.status(400).json({ error: 'INVALID_ID', message: 'Draft id must be a UUID.' });
+    }
+    const deps = await prepareCrud(req, res);
+    if (!deps) return;
+    const { row, notes } = mapDraftPayload(req.body, { orgTimezone: deps.orgTimezone, mode: 'update' });
+    const { compliance, ...draftRow } = row;
+    const { data, error } = await deps.scoped
+      .from('content_drafts')
+      .update(draftRow)
+      .eq('id', id)
+      .eq('org_id', deps.orgId)
+      .select('*')
+      .single();
+    if (error || !data) {
+      const notFound = !error || error.code === 'PGRST116';
+      if (notFound) return res.status(404).json({ error: 'NOT_FOUND', message: 'Draft not found in your workspace.' });
+      return res.status(422).json({ error: 'DRAFT_UPDATE_FAILED', message: error?.message ?? 'no row returned', notes });
+    }
+    let checkCreated = false;
+    if (compliance) {
+      const { error: checkErr } = await deps.scoped.from('compliance_checks').insert({
+        org_id: deps.orgId,
+        draft_id: id,
+        provider: 'rule_local',
+        passed: compliance.passed,
+        detected_fluff: compliance.detected_fluff,
+        char_count: compliance.char_count,
+        max_limit: compliance.max_limit,
+        warnings: compliance.warnings,
+        check_version: compliance.check_version,
+      });
+      checkCreated = !checkErr;
+      if (checkErr) notes.push(`compliance check not stored: ${checkErr.message}`);
+    }
+    return res.status(200).json({ ...(data as object), ...(checkCreated || notes.length ? { checkCreated, notes } : {}) });
+  } catch (err) {
+    return crudError(res, err);
+  }
+});
+
+app.delete('/api/drafts/:id', crudRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!UUID_PARAM_RE.test(id)) {
+      return res.status(400).json({ error: 'INVALID_ID', message: 'Draft id must be a UUID.' });
+    }
+    const deps = await prepareCrud(req, res);
+    if (!deps) return;
+    // calendar_events.draft_id and compliance_checks.draft_id both CASCADE.
+    const { data, error } = await deps.scoped
+      .from('content_drafts')
+      .delete()
+      .eq('id', id)
+      .eq('org_id', deps.orgId)
+      .select('id');
+    if (error) {
+      return res.status(422).json({ error: 'DRAFT_DELETE_FAILED', message: error.message });
+    }
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'Draft not found in your workspace.' });
+    }
+    return res.status(200).json({ ok: true, id });
+  } catch (err) {
+    return crudError(res, err);
+  }
+});
+
+// ── Calendar events ─────────────────────────────────────────────────────────
+app.post('/api/events', crudRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const deps = await prepareCrud(req, res);
+    if (!deps) return;
+    const { row, notes } = mapEventPayload(req.body, { orgId: deps.orgId, orgTimezone: deps.orgTimezone, mode: 'create' });
+    const { data, error } = await deps.scoped.from('calendar_events').insert(row).select('*').single();
+    if (error || !data) {
+      return res.status(422).json({ error: 'EVENT_CREATE_FAILED', message: error?.message ?? 'no row returned', notes });
+    }
+    return res.status(201).json(data);
+  } catch (err) {
+    return crudError(res, err);
+  }
+});
+
+app.patch('/api/events/:id', crudRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!UUID_PARAM_RE.test(id)) {
+      return res.status(400).json({ error: 'INVALID_ID', message: 'Event id must be a UUID.' });
+    }
+    const deps = await prepareCrud(req, res);
+    if (!deps) return;
+    const { row, notes } = mapEventPayload(req.body, { orgTimezone: deps.orgTimezone, mode: 'update' });
+    const { data, error } = await deps.scoped
+      .from('calendar_events')
+      .update(row)
+      .eq('id', id)
+      .eq('org_id', deps.orgId)
+      .select('*')
+      .single();
+    if (error || !data) {
+      const notFound = !error || error.code === 'PGRST116';
+      if (notFound) return res.status(404).json({ error: 'NOT_FOUND', message: 'Event not found in your workspace.' });
+      return res.status(422).json({ error: 'EVENT_UPDATE_FAILED', message: error?.message ?? 'no row returned', notes });
+    }
+    return res.status(200).json(data);
+  } catch (err) {
+    return crudError(res, err);
+  }
+});
+
+app.delete('/api/events/:id', crudRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!UUID_PARAM_RE.test(id)) {
+      return res.status(400).json({ error: 'INVALID_ID', message: 'Event id must be a UUID.' });
+    }
+    const deps = await prepareCrud(req, res);
+    if (!deps) return;
+    const { data, error } = await deps.scoped
+      .from('calendar_events')
+      .delete()
+      .eq('id', id)
+      .eq('org_id', deps.orgId)
+      .select('id');
+    if (error) {
+      return res.status(422).json({ error: 'EVENT_DELETE_FAILED', message: error.message });
+    }
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'Event not found in your workspace.' });
+    }
+    return res.status(200).json({ ok: true, id });
+  } catch (err) {
+    return crudError(res, err);
+  }
+});
 
 // Environment configuration
 function resolveModelName(): string {

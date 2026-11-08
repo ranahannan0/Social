@@ -187,8 +187,16 @@ function mapBrand(b: DbBrand): BrandProfile {
 }
 
 /** Map a single DB draft row to the frontend ContentDraft shape. */
-function mapDraft(d: DbDraft): ContentDraft {
+function mapDraft(d: DbDraft, orgTz: string): ContentDraft {
   const hooks = d.hooks ?? {};
+  // scheduledDate is a LOCAL-NAIVE stamp ("YYYY-MM-DDTHH:mm:00") across the
+  // whole frontend model (see dataIntegrity.formatEventStamp). DB stores the
+  // UTC instant — convert with the organization timezone so a hydrated draft
+  // re-syncs (Stage B PATCH) through the exact same naive→UTC path it came
+  // from. Invariant I-2: 'scheduled' without a parseable instant → 'ready'.
+  const isScheduled = asStatus(d.status) === 'scheduled';
+  const localStamp =
+    isScheduled && d.scheduled_at ? utcIsoToLocalNaive(asString(d.scheduled_at), orgTz) : null;
   return {
     id: asString(d.id),
     brandId: asString(d.brand_id),
@@ -207,8 +215,8 @@ function mapDraft(d: DbDraft): ContentDraft {
     caption: asString(d.caption),
     callToAction: asString(d.call_to_action),
     hashtags: asStringArray(d.hashtags),
-    status: asStatus(d.status),
-    scheduledDate: d.scheduled_at ?? undefined,
+    status: localStamp ? 'scheduled' : isScheduled ? 'ready' : asStatus(d.status),
+    scheduledDate: localStamp ? `${localStamp.date}T${localStamp.time}:00` : undefined,
     createdAt: asString(d.created_at, new Date().toISOString()),
     updatedAt: asString(d.updated_at, new Date().toISOString()),
   };
@@ -262,11 +270,15 @@ export function hydrateWorkspaceFromExport(raw: unknown): HydratedWorkspace {
   }
   const ws = r.workspaces[0] as DbWorkspaceExport['workspaces'][number];
   const org = ws.organization ?? { id: '' };
+  // Organization timezone drives ALL naive↔UTC conversions for this workspace
+  // (draft scheduledDate + event date/time). Corrupt values fall back to UTC.
+  const orgTzCandidate = asString(org.default_timezone);
+  const orgTz = isValidTimezone(orgTzCandidate) ? orgTzCandidate : 'UTC';
   const brands = (ws.brands ?? []).map(mapBrand);
   const brandIdByDb = new Map(brands.map(b => [b.id, b.id]));
   const drafts = (ws.drafts ?? [])
     .filter(d => brandIdByDb.has(asString(d.brand_id)))
-    .map(mapDraft);
+    .map(d => mapDraft(d, orgTz));
   const draftIdByDb = new Set(drafts.map(d => d.id));
   const calendarEvents: CalendarEvent[] = [];
   for (const e of ws.calendarEvents ?? []) {

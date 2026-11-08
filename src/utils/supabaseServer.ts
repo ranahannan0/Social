@@ -150,3 +150,35 @@ export async function getUserScopedClient(jwt: string) {
   if (!(await ensureClients())) return null;
   return clients.factory ? clients.factory(jwt) : null;
 }
+
+/**
+ * Resolves the caller's workspace (organization) through a USER-SCOPED
+ * client, so RLS guarantees only member orgs are visible. Stage B design
+ * assumes one org per user (§12 decision 1): the FIRST org by created_at
+ * wins — the same rule the workspace import get-or-create uses, so CRUD
+ * routes and imports always land in the same workspace.
+ *
+ * Returns null when the user has no org yet (pre-bootstrap account).
+ */
+export async function resolveUserOrgContext(
+  scoped: import('@supabase/supabase-js').SupabaseClient
+): Promise<{ orgId: string; timezone: string } | null> {
+  const { data, error } = await scoped
+    .from('organizations')
+    .select('id, default_timezone')
+    .order('created_at', { ascending: true })
+    .limit(1);
+  if (error || !data || data.length === 0) return null;
+  const row = data[0] as { id: string; default_timezone?: string | null };
+  const tzCandidate = typeof row.default_timezone === 'string' ? row.default_timezone : '';
+  let timezone = 'UTC';
+  if (tzCandidate) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: tzCandidate }).format(new Date());
+      timezone = tzCandidate;
+    } catch {
+      timezone = 'UTC';
+    }
+  }
+  return { orgId: row.id, timezone };
+}
