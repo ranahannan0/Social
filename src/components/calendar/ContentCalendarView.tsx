@@ -1,9 +1,9 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { CalendarEvent, PlatformType } from '../../types';
 import { PLATFORMS_CONFIG } from '../../services/constants';
 import { PlatformIcon } from '../common/PlatformIcon';
-import { getLocalDateString } from '../../utils/dateUtils';
+import { addDaysToDateString, getCalendarDateInTimeZone, getDateStringInTimeZone, getIanaTimeZone, getLocalDateString } from '../../utils/dateUtils';
 import {
   CalendarDays,
   ChevronLeft,
@@ -21,10 +21,11 @@ import {
 type CalendarViewMode = 'month' | 'week' | 'day';
 
 export const ContentCalendarView: React.FC = () => {
-  const { calendarEvents, addCalendarEvent, deleteCalendarEvent, drafts, brands, activeBrandId } = useApp();
+  const { calendarEvents, addCalendarEvent, deleteCalendarEvent, drafts, brands, activeBrandId, settings } = useApp();
+  const workspaceTimeZone = getIanaTimeZone(settings.timezone);
 
   const [viewMode, setViewMode] = useState<CalendarViewMode>('month');
-  const [currentDate, setCurrentDate] = useState<Date>(() => new Date());
+  const [currentDate, setCurrentDate] = useState<Date>(() => getCalendarDateInTimeZone(new Date(), workspaceTimeZone));
 
   // Selected event modal
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
@@ -34,16 +35,23 @@ export const ContentCalendarView: React.FC = () => {
   const [newEvent, setNewEvent] = useState({
     title: '',
     platform: 'linkedin' as PlatformType,
-    date: getLocalDateString(new Date()),
+    date: getDateStringInTimeZone(new Date(), workspaceTimeZone),
     time: '10:00',
     status: 'scheduled' as 'draft' | 'scheduled',
     summary: '',
     brandId: activeBrandId,
   });
 
-  // Calendar math for month view
+  // Calendar math is based on the selected workspace timezone, not the browser timezone.
+  useEffect(() => {
+    setCurrentDate(getCalendarDateInTimeZone(new Date(), workspaceTimeZone));
+    setNewEvent(prev => ({ ...prev, date: getDateStringInTimeZone(new Date(), workspaceTimeZone) }));
+  }, [workspaceTimeZone]);
+
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
+  const todayDateString = getDateStringInTimeZone(new Date(), workspaceTimeZone);
+  const dayDateString = getLocalDateString(currentDate);
 
   const monthName = currentDate.toLocaleString('default', { month: 'long', year: 'numeric' });
 
@@ -79,7 +87,7 @@ export const ContentCalendarView: React.FC = () => {
   };
 
   const handleToday = () => {
-    setCurrentDate(new Date());
+    setCurrentDate(getCalendarDateInTimeZone(new Date(), workspaceTimeZone));
   };
 
   // Group events by date string (YYYY-MM-DD)
@@ -219,10 +227,7 @@ export const ContentCalendarView: React.FC = () => {
               const dayNum = idx + 1;
               const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
               const dayEvents = eventsByDate[dateStr] || [];
-              const isToday =
-                dayNum === new Date().getDate() &&
-                month === new Date().getMonth() &&
-                year === new Date().getFullYear();
+              const isToday = dateStr === todayDateString;
 
               return (
                 <div
@@ -284,7 +289,7 @@ export const ContentCalendarView: React.FC = () => {
               const d = new Date(currentDate);
               const dayOfWeek = d.getDay();
               d.setDate(d.getDate() - dayOfWeek + i);
-              const dateStr = d.toISOString().split('T')[0];
+              const dateStr = getLocalDateString(d);
               const dayEvents = eventsByDate[dateStr] || [];
 
               return (
@@ -344,7 +349,7 @@ export const ContentCalendarView: React.FC = () => {
               <p className="text-xs text-zinc-500">Day timetable and posting queue</p>
             </div>
             <span className="text-xs text-zinc-400 font-mono">
-              {(eventsByDate[currentDate.toISOString().split('T')[0]] || []).length} scheduled
+              {(eventsByDate[dayDateString] || []).length} scheduled
             </span>
           </div>
 
