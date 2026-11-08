@@ -54,6 +54,8 @@ async function main() {
     'supabase/migrations/0004_events_checks_jobs_settings.sql',
     'supabase/migrations/0005_rls_policies.sql',
     'supabase/migrations/0006_provision_demo_workspace.sql',
+    'supabase/migrations/0007_supabase_default_privilege_hardening.sql',
+    'supabase/migrations/0008_default_privilege_lockdown.sql',
   ];
 
   for (const f of steps) {

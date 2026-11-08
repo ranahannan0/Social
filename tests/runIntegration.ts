@@ -42,6 +42,11 @@ async function main(): Promise<number> {
   // Environment for the spawned server: never inherit a real Gemini key.
   const serverEnv: NodeJS.ProcessEnv = { ...process.env };
   delete serverEnv.GEMINI_API_KEY; // cost control: force labelled local fallback
+  // Test determinism: these suites assert LOCAL-mode behaviour (honest 501s,
+  // storageMode label). Pin the mode explicitly so a developer's .env (which
+  // may legitimately say supabase) cannot change what the tests assert.
+  // dotenv() inside server.ts does not overwrite already-present variables.
+  serverEnv.STORAGE_MODE = 'local';
   serverEnv.PORT = TEST_PORT;
   serverEnv.NODE_ENV = process.env.NODE_ENV || 'development';
 
