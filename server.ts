@@ -224,6 +224,7 @@ app.post('/api/auth/signup', authRateLimiter, express.json({ limit: '8kb' }), as
       user: { id: data.user.id, email: data.user.email ?? parsed.email },
       session: {
         accessToken: data.session.access_token,
+        refreshToken: data.session.refresh_token,
         expiresAt: data.session.expires_at ?? null,
       },
       requiresEmailConfirmation: false,
@@ -255,6 +256,7 @@ app.post('/api/auth/login', authRateLimiter, express.json({ limit: '8kb' }), asy
       user: { id: data.user.id, email: data.user.email ?? parsed.email },
       session: {
         accessToken: data.session.access_token,
+        refreshToken: data.session.refresh_token,
         expiresAt: data.session.expires_at ?? null,
       },
     });
@@ -264,21 +266,72 @@ app.post('/api/auth/login', authRateLimiter, express.json({ limit: '8kb' }), asy
   }
 });
 
-app.post('/api/auth/logout', authRateLimiter, async (req: Request, res: Response) => {
-  // Logout is intentionally idempotent: it NEVER returns 401 or 501. If the
-  // caller has a valid token, we sign it out server-side as a hygiene step;
-  // if not, we still return 200 OK because the practical "logout" is the
-  // browser dropping its local token anyway. This avoids confusing the
-  // frontend when a session has already expired.
+app.post('/api/auth/refresh', authRateLimiter, express.json({ limit: '8kb' }), async (req: Request, res: Response) => {
+  // Phase 3: silent session renewal. The browser sends the refresh token it
+  // was handed at login/signup; GoTrue rotates it on every use (new refresh
+  // token returned), so the client must always replace BOTH tokens.
+  const rt = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken.trim() : '';
+  if (!rt || rt.length > 512) {
+    return res.status(400).json({
+      error: 'AUTH_VALIDATION',
+      message: 'A valid refreshToken string is required.',
+      errors: { refreshToken: !rt ? 'required' : 'too long' },
+    });
+  }
+  if (getStorageMode() !== 'supabase' || !isSupabaseConfigured()) {
+    return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Auth requires STORAGE_MODE=supabase.' });
+  }
   try {
-    const user = await resolveAuthedUser(req);
-    if (user) {
-      const client = await getAnonClient();
-      if (client) {
-        // We don't have a refresh token (browser only stores access JWT), so
-        // signOut is a no-op on the network — but calling it is harmless.
-        await client.auth.signOut().catch(() => {});
-      }
+    const client = await getAnonClient();
+    if (!client) return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+    const { data, error } = await client.auth.refreshSession({ refresh_token: rt });
+    if (error || !data.session) {
+      // Invalid/expired/revoked refresh token — the browser must re-login.
+      return res.status(401).json({ error: 'INVALID_REFRESH_TOKEN', message: 'Session could not be renewed. Please sign in again.' });
+    }
+    return res.status(200).json({
+      user: { id: data.user?.id ?? null, email: data.user?.email ?? null },
+      session: {
+        accessToken: data.session.access_token,
+        refreshToken: data.session.refresh_token,
+        expiresAt: data.session.expires_at ?? null,
+      },
+    });
+  } catch (err) {
+    console.error('[auth:refresh] failed:', err);
+    return res.status(500).json({ error: 'AUTH_FAILED', message: 'Session renewal failed server-side.' });
+  }
+});
+
+app.post('/api/auth/logout', authRateLimiter, express.json({ limit: '8kb' }), async (req: Request, res: Response) => {
+  // Logout is intentionally idempotent: it NEVER returns 401 or 501. If the
+  // caller sends its refresh token AND a bearer JWT, we revoke that session
+  // GoTrue-side (Phase 3) so a leaked token cannot outlive the logout; if
+  // not, we still return 200 OK because the practical "logout" is the
+  // browser dropping its local tokens anyway.
+  //
+  // Revocation mechanics (verified live, scripts/db/probeLogoutScope.mjs):
+  // GoTrue's admin.signOut() wrapper sends its argument as a JWT header and
+  // silently no-ops on refresh tokens. The endpoint that actually works is
+  // POST /auth/v1/logout?scope=local with the refresh_token in the body —
+  // it revokes exactly that one session (204), after which the token can
+  // no longer renew.
+  try {
+    const rt = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken.trim() : '';
+    const header = req.headers.authorization || '';
+    const jwt = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+    if (rt && rt.length <= 512 && jwt && getStorageMode() === 'supabase' && isSupabaseConfigured()) {
+      // Best-effort revocation — never block logout on its result; the
+      // browser has already dropped its copy.
+      await fetch(`${process.env.SUPABASE_URL}/auth/v1/logout?scope=local`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+          apikey: process.env.SUPABASE_ANON_KEY as string,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ refresh_token: rt }),
+      }).catch(() => {});
     }
     return res.status(200).json({ ok: true });
   } catch (err) {

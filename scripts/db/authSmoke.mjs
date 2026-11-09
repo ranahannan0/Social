@@ -160,6 +160,7 @@ async function main() {
   console.log('\n─── Test 5: login with confirmed user returns 200 + session ───');
   let jwt = null;
   let userId = null;
+  let rt = null; // current (latest rotated) refresh token — tracked Phase 3
   {
     const res = await fetch(`${BASE}/api/auth/login`, {
       method: 'POST',
@@ -171,7 +172,9 @@ async function main() {
     assert('user.id is a uuid', body.user?.id && body.user.id.length === 36, `id=${body.user?.id}`);
     assert('user.email matches input', body.user?.email === TEST_EMAIL, `email=${body.user?.email}`);
     assert('session.accessToken is a string', typeof body.session?.accessToken === 'string' && body.session.accessToken.length > 50, `len=${body.session?.accessToken?.length}`);
+    assert('session.refreshToken is present (Phase 3)', typeof body.session?.refreshToken === 'string' && body.session.refreshToken.length > 10, `len=${body.session?.refreshToken?.length ?? 0}`);
     jwt = body.session?.accessToken;
+    rt = body.session?.refreshToken ?? null;
     userId = body.user?.id;
   }
 
@@ -212,6 +215,54 @@ async function main() {
       headers: { Authorization: 'Bearer not-a-real-jwt' },
     });
     assert('status 401', res.status === 401, `status=${res.status}`);
+  }
+
+  console.log('\n─── Test 9b: POST /api/auth/refresh rotates BOTH tokens (Phase 3) ───');
+  {
+    const res = await fetch(`${BASE}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: rt }),
+    });
+    const body = await jsonSafe(res);
+    assert('status 200', res.status === 200, `status=${res.status}`);
+    assert('new accessToken is a string', typeof body.session?.accessToken === 'string' && body.session.accessToken.length > 50, `len=${body.session?.accessToken?.length}`);
+    assert('new accessToken differs from login token', body.session?.accessToken && body.session.accessToken !== jwt, 'same token reused?');
+    assert('refresh token ROTATED (differs from login one)', typeof body.session?.refreshToken === 'string' && body.session.refreshToken !== rt, `rotated=${body.session?.refreshToken !== rt}`);
+    assert('expiresAt is a number', typeof body.session?.expiresAt === 'number', `expiresAt=${body.session?.expiresAt}`);
+    assert('user.email matches', body.user?.email === TEST_EMAIL, `email=${body.user?.email}`);
+    // Adopt the rotated tokens — everything downstream uses these.
+    jwt = body.session.accessToken;
+    rt = body.session.refreshToken;
+    const meRes = await fetch(`${BASE}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${jwt}` },
+    });
+    const meBody = await jsonSafe(meRes);
+    assert('renewed token works on /api/auth/me', meRes.status === 200 && meBody.user?.email === TEST_EMAIL, `status=${meRes.status}`);
+  }
+
+  console.log('\n─── Test 9c: refresh with garbage token returns 401 ───');
+  {
+    const res = await fetch(`${BASE}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: 'not-a-real-refresh-token-xyz' }),
+    });
+    const body = await jsonSafe(res);
+    assert('status 401', res.status === 401, `status=${res.status}`);
+    assert('error INVALID_REFRESH_TOKEN', body.error === 'INVALID_REFRESH_TOKEN', `error=${body.error}`);
+  }
+
+  console.log('\n─── Test 9d: refresh with missing refreshToken returns 400 (validation-first) ───');
+  {
+    const res = await fetch(`${BASE}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const body = await jsonSafe(res);
+    assert('status 400 (not a confusing 501)', res.status === 400, `status=${res.status}`);
+    assert('error AUTH_VALIDATION', body.error === 'AUTH_VALIDATION', `error=${body.error}`);
   }
 
   console.log('\n─── Test 10: /api/generate returns 401 without JWT (auth-gated) ───');
@@ -336,15 +387,27 @@ async function main() {
     assert('second import reports "already imported" note', Array.isArray(b2.notes) && b2.notes.some(n => /already imported/i.test(n)), `notes=${JSON.stringify(b2.notes).slice(0, 150)}`);
   }
 
-  console.log('\n─── Test 15: /api/auth/logout with JWT returns 200 ───');
+  console.log('\n─── Test 15: /api/auth/logout with JWT + refreshToken revokes the session ───');
   {
     const res = await fetch(`${BASE}/api/auth/logout`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${jwt}` },
+      headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: rt }),
     });
     const body = await jsonSafe(res);
     assert('status 200', res.status === 200, `status=${res.status}`);
     assert('ok: true', body.ok === true, `ok=${body.ok}`);
+
+    // Revocation proof (Phase 3): the revoked refresh token must no longer
+    // renew the session — a leaked token cannot outlive the logout.
+    const rr = await fetch(`${BASE}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: rt }),
+    });
+    const rb = await jsonSafe(rr);
+    assert('revoked refreshToken can no longer renew', rr.status === 401, `status=${rr.status}`);
+    assert('revocation reports INVALID_REFRESH_TOKEN', rb.error === 'INVALID_REFRESH_TOKEN', `error=${rb.error}`);
   }
 
   console.log('\n─── Test 16: /api/auth/logout without JWT also returns 200 (idempotent) ───');

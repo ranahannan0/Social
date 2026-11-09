@@ -1,27 +1,36 @@
 /**
- * Auth client (Phase 2 frontend cutover — design doc §9).
+ * Auth client (Phase 2 frontend cutover — design doc §9; Phase 3 refresh).
  *
  * The browser NEVER talks to Supabase directly. Instead it posts credentials
- * to our own Express auth endpoints, which return a Supabase access JWT. The
- * browser stores the JWT in sessionStorage and sends it as
- * `Authorization: Bearer <jwt>` on every subsequent /api call.
+ * to our own Express auth endpoints, which return a Supabase session. The
+ * browser stores { accessToken, refreshToken, expiresAt } in sessionStorage
+ * and sends `Authorization: Bearer <jwt>` on every subsequent /api call.
  *
  * Storage choice: sessionStorage (NOT localStorage). A persisted cross-tab
- * token is a broader XSS surface; sessionStorage scopes the token to the
+ * token is a broader XSS surface; sessionStorage scopes the tokens to the
  * current tab, which is the standard trade-off for SPA auth without an
  * httpOnly cookie backend.
  *
- * Token refresh is intentionally NOT implemented here — the access JWT is
- * used until it expires (Supabase default 1h), after which API calls start
- * returning 401 and the AuthContext will surface a "session expired" state
- * that pushes the user back to the login screen. Refresh-token handling is
- * deferred to Phase 3 (per-resource CRUD release).
+ * Phase 3 token refresh:
+ * - GoTrue access JWTs live ~1h. Before an authed request, if the token is
+ *   inside the refresh leeway window (or already expired) AND a refresh
+ *   token exists, POST /api/auth/refresh silently renews BOTH tokens
+ *   (GoTrue rotates the refresh token on every use — the new one is stored).
+ * - Refreshes are single-flight: parallel requests share one renewal.
+ * - If a request still lands 401, authedFetch force-refreshes once and
+ *   retries the request once (safe: the first attempt was rejected at the
+ *   auth gate, never executed server-side). Only a second 401 clears the
+ *   session and pushes the user to the login screen.
+ * - Logout sends the refresh token so the server revokes it GoTrue-side —
+ *   a leaked token cannot outlive the logout.
  */
 
 const SESSION_KEY = 'omni_plus_session_v1';
 
 export interface AuthSession {
   accessToken: string;
+  /** GoTrue refresh token (Phase 3). Absent in sessions from older builds. */
+  refreshToken?: string | null;
   expiresAt: number | null; // unix seconds, may be null from upstream
 }
 
@@ -81,6 +90,37 @@ export function getAccessToken(): string | null {
   return readStored()?.accessToken ?? null;
 }
 
+function authHeaders(init: RequestInit): Headers {
+  const headers = new Headers(init.headers || {});
+  const token = getAccessToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  return headers;
+}
+
+/**
+ * Fetch with the auth header injected, Phase 3 silent renewal, and a single
+ * 401 → force-refresh → retry cycle. If the retry also lands 401 the local
+ * session is cleared so the AuthContext can flip the user to the login
+ * screen. (Retrying after 401 is safe for every method: the first attempt
+ * was rejected at the auth gate and never executed server-side.)
+ */
+export async function authedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  await ensureFreshSession();
+  const first = await fetch(input, { ...init, headers: authHeaders(init) });
+  if (first.status !== 401) return first;
+  const s = readStored();
+  if (s?.refreshToken) {
+    const renewed = await ensureFreshSession(true);
+    if (renewed) {
+      const retry = await fetch(input, { ...init, headers: authHeaders(init) });
+      if (retry.status !== 401) return retry;
+    }
+  }
+  // Session is bad — drop it so the UI can react.
+  clearSession();
+  return first;
+}
+
 /** Returns true if a session is stored AND not past its expiry. */
 export function hasValidSession(): boolean {
   const s = readStored();
@@ -119,11 +159,21 @@ export async function signUp(email: string, password: string): Promise<AuthResul
   const body = await parseJsonSafe(res);
   if (!res.ok) throwFromResponse(res.status, body);
   if (body?.session?.accessToken) {
-    writeStored({ accessToken: body.session.accessToken, expiresAt: body.session.expiresAt ?? null });
+    writeStored({
+      accessToken: body.session.accessToken,
+      refreshToken: typeof body.session.refreshToken === 'string' && body.session.refreshToken ? body.session.refreshToken : null,
+      expiresAt: body.session.expiresAt ?? null,
+    });
   }
   return {
     user: body?.user ?? { id: null, email },
-    session: body?.session ? { accessToken: body.session.accessToken, expiresAt: body.session.expiresAt ?? null } : null,
+    session: body?.session
+      ? {
+          accessToken: body.session.accessToken,
+          refreshToken: typeof body.session.refreshToken === 'string' ? body.session.refreshToken : null,
+          expiresAt: body.session.expiresAt ?? null,
+        }
+      : null,
     requiresEmailConfirmation: body?.requiresEmailConfirmation ?? false,
   };
 }
@@ -139,25 +189,39 @@ export async function signIn(email: string, password: string): Promise<AuthResul
   if (!body?.session?.accessToken) {
     throw new AuthError('Login succeeded but no session was returned.', 500, 'NO_SESSION');
   }
-  writeStored({ accessToken: body.session.accessToken, expiresAt: body.session.expiresAt ?? null });
+  writeStored({
+    accessToken: body.session.accessToken,
+    refreshToken: typeof body.session.refreshToken === 'string' && body.session.refreshToken ? body.session.refreshToken : null,
+    expiresAt: body.session.expiresAt ?? null,
+  });
   return {
     user: body.user,
-    session: { accessToken: body.session.accessToken, expiresAt: body.session.expiresAt ?? null },
+    session: {
+      accessToken: body.session.accessToken,
+      refreshToken: typeof body.session.refreshToken === 'string' ? body.session.refreshToken : null,
+      expiresAt: body.session.expiresAt ?? null,
+    },
   };
 }
 
 export async function signOut(): Promise<void> {
-  const token = getAccessToken();
-  if (token) {
-    // Best-effort — never block on the network call. The token is dropped
-    // locally regardless of the response.
+  const s = readStored();
+  if (s?.accessToken) {
+    // Best-effort — never block on the network call. Tokens are dropped
+    // locally regardless of the response. Sending the refresh token lets the
+    // server revoke the GoTrue session so a leaked token cannot outlive
+    // this logout (Phase 3).
     try {
       await fetch('/api/auth/logout', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${s.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ refreshToken: s.refreshToken ?? null }),
       });
     } catch {
-      // Network error: token still dropped below.
+      // Network error: tokens still dropped below.
     }
   }
   clearSession();
@@ -165,9 +229,13 @@ export async function signOut(): Promise<void> {
 
 /**
  * Verifies the current session with the server. Returns the user shape, or
- * null if the token is missing/invalid/expired.
+ * null if there is no recoverable session. Expired-but-refreshable sessions
+ * are silently renewed first (Phase 3), so a user returning to a stale tab
+ * stays logged in instead of being pushed to the login screen.
  */
 export async function fetchMe(): Promise<AuthUser | null> {
+  const alive = await ensureFreshSession();
+  if (!alive) return null;
   const token = getAccessToken();
   if (!token) return null;
   const res = await fetch('/api/auth/me', {
@@ -183,20 +251,74 @@ export async function fetchMe(): Promise<AuthUser | null> {
 }
 
 /**
- * Wrap fetch with the auth header injected. If the server returns 401, the
- * local session is cleared so the AuthContext can flip the user back to the
- * login screen.
+ * Proactive-refresh decision (pure — unit tested).
+ * Returns true when the stored access token is expired or will expire within
+ * `leewaySeconds`. `expiresAt === null` means unknown expiry: we never
+ * proactively refresh (we would not know when), the 401 path handles it.
  */
-export async function authedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
-  const token = getAccessToken();
-  const headers = new Headers(init.headers || {});
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`);
+export function shouldProactiveRefresh(
+  expiresAt: number | null,
+  nowMs: number,
+  leewaySeconds = 60
+): boolean {
+  if (expiresAt === null) return false;
+  return expiresAt * 1000 - nowMs <= leewaySeconds * 1000;
+}
+
+/**
+ * Renew the session server-side. Returns true on success (tokens replaced).
+ * A 401 means the refresh token itself is dead → session cleared, caller
+ * should treat the user as logged out. Network/5xx failures keep the
+ * existing tokens (the old access token may still work; requests will
+ * surface 401 through the normal path if not).
+ */
+async function doRefresh(refreshToken: string): Promise<boolean> {
+  try {
+    const res = await fetch('/api/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (res.status === 401) {
+      clearSession(); // refresh token invalid/revoked — definitively logged out
+      return false;
+    }
+    if (!res.ok) return true; // 500/501 etc — optimistic, keep current tokens
+    const body = await parseJsonSafe(res);
+    const session = body?.session;
+    if (!session?.accessToken || typeof session.accessToken !== 'string') return true;
+    writeStored({
+      accessToken: session.accessToken,
+      refreshToken: typeof session.refreshToken === 'string' && session.refreshToken ? session.refreshToken : null,
+      expiresAt: typeof session.expiresAt === 'number' ? session.expiresAt : null,
+    });
+    return true;
+  } catch {
+    return true; // network error — optimistic, let the request try
   }
-  const res = await fetch(input, { ...init, headers });
-  if (res.status === 401) {
-    // Session is bad — drop it so the UI can react.
-    clearSession();
+}
+
+let refreshInFlight: Promise<boolean> | null = null;
+
+/**
+ * Make sure a usable session exists before an authed request.
+ * - No stored session → false.
+ * - Fresh token (outside leeway) → true, no network call.
+ * - Expiring/expired with a refresh token → single-flight server renewal.
+ * - No refresh token → true (nothing to renew; legacy behaviour applies).
+ *
+ * `force` skips the freshness check (used by the authedFetch 401 retry).
+ */
+export function ensureFreshSession(force = false): Promise<boolean> {
+  const s = readStored();
+  if (!s) return Promise.resolve(false);
+  if (!force && !shouldProactiveRefresh(s.expiresAt, Date.now())) return Promise.resolve(true);
+  if (!s.refreshToken) return Promise.resolve(true); // cannot renew — proceed as-is
+  if (!refreshInFlight) {
+    const rt = s.refreshToken;
+    refreshInFlight = doRefresh(rt).finally(() => {
+      refreshInFlight = null;
+    });
   }
-  return res;
+  return refreshInFlight;
 }

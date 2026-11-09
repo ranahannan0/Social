@@ -526,6 +526,41 @@ async function runAllTests(): Promise<boolean> {
     };
   });
 
+  await assertTest('Auth Refresh Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: 'stale-refresh-token' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'SUPABASE_UNAVAILABLE';
+    return {
+      passed: is501 && honest,
+      expected: '501 SUPABASE_UNAVAILABLE — never fake a session renewal in local mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Auth Refresh Rejects Missing refreshToken With 400 (validation before mode)', async () => {
+    // Validation-first design: a malformed body is a client-side error and
+    // must 400 even in local mode — never a confusing 501. Same contract as
+    // signup/login.
+    const res = await fetch(`${BASE_URL}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is400 = res.status === 400;
+    const honest = body.error === 'AUTH_VALIDATION';
+    return {
+      passed: is400 && honest,
+      expected: '400 AUTH_VALIDATION (missing refreshToken) before any storage-mode check',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
   // 8k. Stage B CRUD endpoints: honest 501 in LOCAL storage mode
   // The per-resource sync routes (/api/brands, /api/drafts, /api/events) must
   // behave exactly like the workspace routes when Supabase is not configured:

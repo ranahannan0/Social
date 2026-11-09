@@ -20,6 +20,7 @@ import {
   signOut as clientSignOut,
   fetchMe,
   hasValidSession,
+  ensureFreshSession,
 } from '../services/authClient';
 import { resetSyncQueue } from '../services/cloudSync';
 
@@ -41,13 +42,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [authError, setAuthError] = useState<string | null>(null);
 
   // Boot probe: if a session exists in sessionStorage, verify it with the
-  // server. If valid, hydrate the user. If not, drop the stale token.
+  // server. Phase 3: an expired access token is no longer a logout —
+  // ensureFreshSession silently renews it from the refresh token first, so
+  // a user returning to a stale tab stays signed in. Only a missing or
+  // unrecoverable session drops the user to the login screen.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!hasValidSession()) {
-        setLoading(false);
-        return;
+        const renewed = await ensureFreshSession().catch(() => false);
+        if (!renewed) {
+          if (!cancelled) setLoading(false);
+          return;
+        }
       }
       try {
         const me = await fetchMe();
