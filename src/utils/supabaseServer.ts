@@ -153,21 +153,35 @@ export async function getUserScopedClient(jwt: string) {
 
 /**
  * Resolves the caller's workspace (organization) through a USER-SCOPED
- * client, so RLS guarantees only member orgs are visible. Stage B design
- * assumes one org per user (§12 decision 1): the FIRST org by created_at
- * wins — the same rule the workspace import get-or-create uses, so CRUD
- * routes and imports always land in the same workspace.
+ * client, so RLS guarantees only member orgs are visible. Default rule
+ * (no org requested): the FIRST org by created_at wins — the same rule the
+ * workspace import get-or-create uses, so CRUD routes and imports always
+ * land in the same workspace.
  *
- * Returns null when the user has no org yet (pre-bootstrap account).
+ * Phase 3 multi-org: when `requestedOrgId` is provided (already validated
+ * as a UUID by the caller), the resolver selects THAT org. RLS is the
+ * membership gate — a non-member sees zero rows, which the caller maps to
+ * 403. This makes the explicit check defense-in-depth, not the only gate.
+ *
+ * Returns null when the user has no org yet (pre-bootstrap account) or,
+ * with a requested id, when the org does not exist or the caller is not a
+ * member of it (caller decides 409 vs 403).
  */
 export async function resolveUserOrgContext(
-  scoped: import('@supabase/supabase-js').SupabaseClient
+  scoped: import('@supabase/supabase-js').SupabaseClient,
+  requestedOrgId?: string
 ): Promise<{ orgId: string; timezone: string } | null> {
-  const { data, error } = await scoped
+  let query = scoped
     .from('organizations')
     .select('id, default_timezone')
     .order('created_at', { ascending: true })
     .limit(1);
+  if (requestedOrgId) {
+    // RLS scoping applies to this filtered query too: a non-member's
+    // filtered select returns zero rows.
+    query = query.eq('id', requestedOrgId);
+  }
+  const { data, error } = await query;
   if (error || !data || data.length === 0) return null;
   const row = data[0] as { id: string; default_timezone?: string | null };
   const tzCandidate = typeof row.default_timezone === 'string' ? row.default_timezone : '';

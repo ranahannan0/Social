@@ -19,12 +19,13 @@ import {
   buildInitialDrafts,
   buildInitialCalendarEvents,
 } from '../services/constants';
-import { authedFetch, hasValidSession } from '../services/authClient';
+import { authedFetch, hasValidSession, setActiveOrgId, restoreActiveOrgId, getActiveOrgId } from '../services/authClient';
 import {
   enqueueSync,
   isDbUuid,
   retrySync,
   drainSyncQueue,
+  resetSyncQueue,
   subscribeSync,
   brandSyncBody,
   draftSyncBody,
@@ -32,7 +33,7 @@ import {
   type SyncState,
   type SyncTask,
 } from '../services/cloudSync';
-import { hydrateWorkspaceFromExport, HydrateError } from '../utils/workspaceHydrate';
+import { hydrateWorkspaceFromExport, listOrgsFromExport, HydrateError, type OrgSummary } from '../utils/workspaceHydrate';
 import {
   WORKSPACE_EXPORT_FORMAT_VERSION,
   validateWorkspaceExport,
@@ -81,6 +82,16 @@ interface AppContextType {
   syncState: SyncState;
   /** Retry any pending cloud-sync tasks after a failure. */
   retryPendingSync: () => void;
+  /** Phase 3 multi-org: every workspace the user belongs to. */
+  orgs: OrgSummary[];
+  /** The workspace currently loaded into the app (null = first-org default). */
+  activeOrgId: string | null;
+  /**
+   * Switch to another workspace the user is a member of. Re-fetches the
+   * export, hydrates the matching workspace and replaces local state.
+   * Throws on network/server error; state is left untouched on failure.
+   */
+  switchOrg: (orgId: string) => Promise<void>;
   stats: {
     totalDrafts: number;
     readyDrafts: number;
@@ -129,6 +140,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Stage B auto-sync: subscription to the cloudSync engine's queue state.
   const [syncState, setSyncState] = useState<SyncState>(() => ({ pending: 0, lastError: null }));
   useEffect(() => subscribeSync(setSyncState), []);
+
+  // Phase 3 multi-org: every workspace the user belongs to + the active one.
+  // activeOrgIdState mirrors authClient's module-level activeOrgId so the
+  // UI and the network layer never disagree.
+  const [orgs, setOrgs] = useState<OrgSummary[]>([]);
+  const [activeOrgIdState, setActiveOrgIdState] = useState<string | null>(null);
 
   // Load from LocalStorage with clean initial fallback
   // Seed factories build dates relative to the actual current date, so the
@@ -213,11 +230,68 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (hydrated.activeBrandId) {
       setActiveBrandId(hydrated.activeBrandId);
     }
+    // Phase 3 multi-org: keep the switcher + network layer in sync.
+    setOrgs(listOrgsFromExport(data));
+    setActiveOrgIdState(hydrated.organizationId);
+    setActiveOrgId(hydrated.organizationId);
+  }
+
+  /**
+   * Phase 3 multi-org: switch the active workspace. Flushes any pending
+   * Stage-B sync tasks FIRST (they target the outgoing workspace — replaying
+   * them under the new x-org-id would cross workspaces), then re-fetches the
+   * export aimed at the target org and replaces local state. On failure the
+   * previous workspace selection is restored and the error re-thrown.
+   */
+  async function switchOrg(orgId: string): Promise<void> {
+    const previousOrgId = getActiveOrgId();
+    setHydrationStatus('loading');
+    setHydrationError(null);
+    try {
+      const drained = await drainSyncQueue();
+      if (!drained) {
+        // Tasks stuck on a transient failure — dropping is safer than
+        // replaying them into the wrong workspace.
+        resetSyncQueue();
+      }
+      setActiveOrgId(orgId);
+      const res = await authedFetch('/api/workspace/export');
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.message || `Export failed (status ${res.status}).`);
+      }
+      const data = await res.json();
+      const hydrated = hydrateWorkspaceFromExport(data, orgId);
+      setBrands(hydrated.brands.length > 0 ? hydrated.brands : buildInitialBrands());
+      setDrafts(hydrated.drafts);
+      setCalendarEvents(hydrated.calendarEvents);
+      setSettings(hydrated.settings);
+      if (hydrated.activeBrandId) {
+        setActiveBrandId(hydrated.activeBrandId);
+      }
+      setOrgs(listOrgsFromExport(data));
+      setActiveOrgIdState(hydrated.organizationId);
+      setHydrationStatus('ready');
+      setLastSyncAt(new Date().toISOString());
+      setLastSyncSummary(`Switched to workspace “${hydrated.organizationName ?? orgId}”.`);
+    } catch (err) {
+      // Restore the previous selection so the network layer keeps targeting
+      // the workspace the UI still shows.
+      setActiveOrgId(previousOrgId);
+      setActiveOrgIdState(previousOrgId);
+      setHydrationStatus('error');
+      setHydrationError(err instanceof Error ? err.message : 'Workspace switch failed.');
+      throw err;
+    }
   }
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Phase 3 multi-org: a workspace picked in a previous session of this
+      // tab wins. A stale id (org since left/deleted) falls back to the
+      // first workspace inside the hydrator.
+      const restoredOrgId = restoreActiveOrgId();
       setHydrationStatus('loading');
       setHydrationError(null);
       try {
@@ -227,7 +301,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           throw new Error(body?.message || `Export failed (status ${res.status}).`);
         }
         const data = await res.json();
-        const hydrated = hydrateWorkspaceFromExport(data);
+        const hydrated = hydrateWorkspaceFromExport(data, restoredOrgId ?? undefined);
         if (cancelled) return;
         if (hydrated.organizationId === null) {
           // Empty cloud workspace — bootstrap from local demo seed.
@@ -259,6 +333,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (hydrated.activeBrandId) {
           setActiveBrandId(hydrated.activeBrandId);
         }
+        // Phase 3 multi-org: publish the workspace list + resolved active org.
+        setOrgs(listOrgsFromExport(data));
+        setActiveOrgIdState(hydrated.organizationId);
+        setActiveOrgId(hydrated.organizationId);
         retireLocalStorage();
         setHydrationStatus('ready');
       } catch (err) {
@@ -727,6 +805,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         lastSyncSummary,
         syncState,
         retryPendingSync: retrySync,
+        orgs,
+        activeOrgId: activeOrgIdState,
+        switchOrg,
         stats,
       }}
     >

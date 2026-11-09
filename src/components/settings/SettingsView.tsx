@@ -41,6 +41,9 @@ export const SettingsView: React.FC = () => {
     hydrationError,
     syncState,
     retryPendingSync,
+    orgs,
+    activeOrgId,
+    switchOrg,
   } = useApp();
   const { user, signOut } = useAuth();
 
@@ -50,6 +53,18 @@ export const SettingsView: React.FC = () => {
   const [resetSuccess, setResetSuccess] = useState(false);
   const [isConfirmingReset, setIsConfirmingReset] = useState(false);
   const [exportMsg, setExportMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // Phase 3 multi-org: workspace switcher state (in-flight id + last error).
+  const [switchingOrgId, setSwitchingOrgId] = useState<string | null>(null);
+  const [switchOrgError, setSwitchOrgError] = useState<string | null>(null);
+
+  const handleSwitchOrg = (orgId: string) => {
+    if (orgId === activeOrgId || switchingOrgId) return;
+    setSwitchingOrgId(orgId);
+    setSwitchOrgError(null);
+    switchOrg(orgId)
+      .catch((e: Error) => setSwitchOrgError(e.message || 'Workspace switch failed.'))
+      .finally(() => setSwitchingOrgId(null));
+  };
 
   const handleExportBackup = () => {
     try {
@@ -538,6 +553,80 @@ export const SettingsView: React.FC = () => {
                     Pending changes retry automatically. “Full sync” below can also repair everything.
                   </div>
                 </div>
+              </div>
+            )}
+          </div>
+
+          {/* Workspaces (Phase 3 multi-org) */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                  <Share2 className="w-4 h-4 text-zinc-400" />
+                  <span>Workspaces</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold">PHASE 3 · LIVE</span>
+                </h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  {orgs.length > 1
+                    ? 'You belong to several workspaces. Switching reloads that workspace — nothing is copied or merged.'
+                    : 'Your account has one workspace. Invite-based multi-member workspaces land later.'}
+                </p>
+              </div>
+              <span className="text-xs px-3 py-1.5 rounded-md bg-zinc-800/80 border border-zinc-700 text-zinc-300 font-medium shrink-0">
+                {orgs.length} {orgs.length === 1 ? 'workspace' : 'workspaces'}
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              {orgs.map(o => {
+                const isActive = o.id === activeOrgId;
+                const isBusy = switchingOrgId === o.id;
+                return (
+                  <button
+                    key={o.id}
+                    type="button"
+                    disabled={isActive || !!switchingOrgId}
+                    onClick={() => handleSwitchOrg(o.id)}
+                    className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
+                      isActive
+                        ? 'bg-emerald-500/10 border-emerald-500/30'
+                        : 'bg-zinc-950 border-zinc-800/80 hover:bg-zinc-900 disabled:opacity-50'
+                    }`}
+                  >
+                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                      isActive ? 'bg-emerald-500/15 border border-emerald-500/30' : 'bg-zinc-900 border border-zinc-800'
+                    }`}>
+                      {isBusy ? (
+                        <Loader2 className="w-4 h-4 text-zinc-300 animate-spin" />
+                      ) : isActive ? (
+                        <Check className="w-4 h-4 text-emerald-400" />
+                      ) : (
+                        <Share2 className="w-4 h-4 text-zinc-500" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-zinc-100 font-medium truncate">{o.name}</div>
+                      <div className="text-xs text-zinc-500 truncate">{o.defaultTimezone ?? 'UTC'}</div>
+                    </div>
+                    {isActive && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold shrink-0">
+                        ACTIVE
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+              {orgs.length === 0 && hydrationStatus === 'loading' && (
+                <div className="text-xs text-zinc-500 flex items-center gap-2 p-3">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading workspaces…
+                </div>
+              )}
+            </div>
+
+            {switchOrgError && (
+              <div className="text-xs flex items-start gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-300">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="flex-1">{switchOrgError}</div>
               </div>
             )}
           </div>

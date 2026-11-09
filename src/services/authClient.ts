@@ -26,6 +26,40 @@
  */
 
 const SESSION_KEY = 'omni_plus_session_v1';
+/**
+ * Phase 3 multi-org: the caller's ACTIVE workspace id. authedFetch stamps
+ * it as `x-org-id` on every API call so CRUD/import land in the workspace
+ * the user switched to. null = no preference → server falls back to the
+ * first org (pre-P3.2 behaviour). Cleared on sign-out.
+ */
+const ACTIVE_ORG_KEY = 'omni_plus_active_org_v1';
+let activeOrgId: string | null = null;
+
+/** Set the active workspace for all subsequent authed API calls. */
+export function setActiveOrgId(orgId: string | null): void {
+  activeOrgId = typeof orgId === 'string' && orgId.length > 0 ? orgId : null;
+  try {
+    if (activeOrgId) sessionStorage.setItem(ACTIVE_ORG_KEY, activeOrgId);
+    else sessionStorage.removeItem(ACTIVE_ORG_KEY);
+  } catch {
+    // private-browsing mode — the in-memory value still works for this page
+  }
+}
+
+/** Restore the persisted active workspace (called once during auth boot). */
+export function restoreActiveOrgId(): string | null {
+  try {
+    const raw = sessionStorage.getItem(ACTIVE_ORG_KEY);
+    activeOrgId = typeof raw === 'string' && raw.length > 0 ? raw : null;
+  } catch {
+    activeOrgId = null;
+  }
+  return activeOrgId;
+}
+
+export function getActiveOrgId(): string | null {
+  return activeOrgId;
+}
 
 export interface AuthSession {
   accessToken: string;
@@ -94,6 +128,7 @@ function authHeaders(init: RequestInit): Headers {
   const headers = new Headers(init.headers || {});
   const token = getAccessToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
+  if (activeOrgId) headers.set('x-org-id', activeOrgId);
   return headers;
 }
 
@@ -118,6 +153,7 @@ export async function authedFetch(input: RequestInfo | URL, init: RequestInit = 
   }
   // Session is bad — drop it so the UI can react.
   clearSession();
+  setActiveOrgId(null); // workspace selection belongs to the signed-out session
   return first;
 }
 
@@ -225,6 +261,7 @@ export async function signOut(): Promise<void> {
     }
   }
   clearSession();
+  setActiveOrgId(null); // the workspace selection dies with the session
 }
 
 /**

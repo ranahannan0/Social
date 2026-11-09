@@ -52,11 +52,17 @@ function slugify(name: string): string {
  * NOTE: verified against the real schema only via the local Postgres harness
  * (raw-SQL equivalent in supabase/tests/importMapper.db.test.ts). The
  * supabase-js path itself runs only when Supabase credentials exist.
+ *
+ * Phase 3 multi-org: `targetOrgId` (pre-validated by the caller as a
+ * workspace the user is a member of) imports into THAT org, skipping the
+ * get-or-create step. Omitted → legacy behaviour: reuse the first org,
+ * create one only when the account has none.
  */
 export async function executeWorkspaceImport(
   scoped: SupabaseClient,
   mapped: MappedWorkspace,
-  exportedAt: string
+  exportedAt: string,
+  targetOrgId?: string
 ): Promise<ImportReport> {
   const report: ImportReport = {
     orgId: null,
@@ -67,7 +73,7 @@ export async function executeWorkspaceImport(
     errors: [],
   };
 
-  // ── 1. Org: get-or-create (one org per user per design doc §12 decision 1)
+  // ── 1. Org: get-or-create ─────────────────────────────────────────────────
   //
   // The create_organization RPC inserts a NEW org on every call. Without this
   // pre-check, a user who clicks "Sync to Cloud" twice would end up with two
@@ -75,8 +81,13 @@ export async function executeWorkspaceImport(
   // workspaces[0]) would show stale data from the first org while the user's
   // latest sync sat unread in the second. Reuse the existing org when one
   // exists; only call create_organization on first import.
+  // Phase 3: a validated `targetOrgId` (the caller's active workspace) takes
+  // precedence and skips both the lookup and the creation.
   let orgId: string | null = null;
-  {
+  if (targetOrgId) {
+    orgId = targetOrgId;
+    report.notes.push('Imported into the caller\'s active workspace.');
+  } else {
     const { data: existingOrgs, error: listErr } = await scoped
       .from('organizations')
       .select('id')

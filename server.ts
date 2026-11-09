@@ -351,6 +351,55 @@ app.get('/api/auth/me', authRateLimiter, async (req: Request, res: Response) => 
 });
 
 // ============================================================================
+// Workspaces list (Phase 3 multi-org — P3.2)
+// Returns every organization the caller is a member of, with their role.
+// The user-scoped client means RLS filters both queries to the caller's own
+// memberships; the roles are joined in JS from organization_members.
+// 501 in local mode (honest — no Supabase, no orgs), 401 without a JWT.
+// ============================================================================
+const orgsRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'RATE_LIMITED', message: 'Too many workspace list requests. Try again in a minute.' },
+});
+
+app.get('/api/orgs', orgsRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const user = getAuthedUser(req);
+    const scoped = await getUserScopedClient(user.token);
+    if (!scoped) {
+      return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+    }
+    const [orgsRes, membersRes] = await Promise.all([
+      scoped.from('organizations').select('id, name, slug, default_timezone, created_at').order('created_at', { ascending: true }),
+      scoped.from('organization_members').select('org_id, role'),
+    ]);
+    if (orgsRes.error) {
+      console.error('[orgs] list failed:', orgsRes.error.message);
+      return res.status(500).json({ error: 'ORGS_FAILED', message: 'Workspace list failed server-side.' });
+    }
+    const roleByOrg = new Map<string, string>();
+    for (const m of (membersRes.data ?? []) as Array<{ org_id: string; role: string }>) {
+      roleByOrg.set(m.org_id, m.role);
+    }
+    const orgs = ((orgsRes.data ?? []) as Array<Record<string, unknown>>).map(o => ({
+      id: o.id as string,
+      name: o.name as string,
+      slug: o.slug as string,
+      defaultTimezone: o.default_timezone as string,
+      role: roleByOrg.get(o.id as string) ?? 'member',
+      createdAt: o.created_at as string,
+    }));
+    return res.status(200).json({ orgs });
+  } catch (err) {
+    console.error('[orgs] failed:', err);
+    return res.status(500).json({ error: 'ORGS_FAILED', message: 'Workspace list failed server-side.' });
+  }
+});
+
+// ============================================================================
 // Workspace Import/Export (Phase 2 — design doc §8/§9)
 // Registered BEFORE the global 64kb parser so the import route can carry its
 // own 2MB limit (backup files exceed 64kb with real content).
@@ -421,7 +470,21 @@ app.post(
         return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
       }
       const exportedAt = typeof req.body?.exportedAt === 'string' ? req.body.exportedAt : new Date().toISOString();
-      const report = await executeWorkspaceImport(scoped, mapped.value, exportedAt);
+      // Phase 3 multi-org: honor the caller's active workspace. The header is
+      // validated (UUID + membership through RLS) before any insert happens.
+      const requestedOrgId = requestedOrgIdFrom(req);
+      if (requestedOrgId === 'INVALID') {
+        return res.status(400).json({ error: 'INVALID_ORG_ID', message: 'The x-org-id header must be a UUID.' });
+      }
+      let targetOrgId: string | undefined;
+      if (requestedOrgId) {
+        const orgCtx = await resolveUserOrgContext(scoped, requestedOrgId);
+        if (!orgCtx) {
+          return res.status(403).json({ error: 'FORBIDDEN_ORG', message: 'You are not a member of that workspace.' });
+        }
+        targetOrgId = orgCtx.orgId;
+      }
+      const report = await executeWorkspaceImport(scoped, mapped.value, exportedAt, targetOrgId);
       // 207 = partial success (rows created AND per-row errors reported)
       const status = report.errors.length > 0 ? 207 : 201;
       return res.status(status).json(report);
@@ -472,6 +535,22 @@ interface CrudDeps {
   orgTimezone: string;
 }
 
+/**
+ * Phase 3 multi-org: the optional `x-org-id` header lets a caller target a
+ * specific workspace they are a member of. Absent → the first-org default
+ * (backwards compatible with every Stage B client). Malformed (non-UUID)
+ * → 400 before any DB work; well-formed but non-member → 403 (RLS returns
+ * zero rows, so we never leak whether the org exists).
+ */
+function requestedOrgIdFrom(req: Request): string | null | 'INVALID' {
+  const raw = req.headers['x-org-id'];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  if (!UUID_PARAM_RE.test(trimmed)) return 'INVALID';
+  return trimmed;
+}
+
 async function prepareCrud(req: Request, res: Response): Promise<CrudDeps | null> {
   const user = getAuthedUser(req);
   const scoped = await getUserScopedClient(user.token);
@@ -479,12 +558,24 @@ async function prepareCrud(req: Request, res: Response): Promise<CrudDeps | null
     res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
     return null;
   }
-  const orgCtx = await resolveUserOrgContext(scoped);
+  const requestedOrgId = requestedOrgIdFrom(req);
+  if (requestedOrgId === 'INVALID') {
+    res.status(400).json({ error: 'INVALID_ORG_ID', message: 'The x-org-id header must be a UUID.' });
+    return null;
+  }
+  const orgCtx = await resolveUserOrgContext(scoped, requestedOrgId ?? undefined);
   if (!orgCtx) {
-    res.status(409).json({
-      error: 'NO_WORKSPACE',
-      message: 'No cloud workspace exists for this account yet. Open the app once to bootstrap it, then retry.',
-    });
+    if (requestedOrgId) {
+      res.status(403).json({
+        error: 'FORBIDDEN_ORG',
+        message: 'You are not a member of that workspace.',
+      });
+    } else {
+      res.status(409).json({
+        error: 'NO_WORKSPACE',
+        message: 'No cloud workspace exists for this account yet. Open the app once to bootstrap it, then retry.',
+      });
+    }
     return null;
   }
   return { scoped, orgId: orgCtx.orgId, orgTimezone: orgCtx.timezone };

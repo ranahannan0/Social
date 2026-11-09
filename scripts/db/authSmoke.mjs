@@ -387,6 +387,142 @@ async function main() {
     assert('second import reports "already imported" note', Array.isArray(b2.notes) && b2.notes.some(n => /already imported/i.test(n)), `notes=${JSON.stringify(b2.notes).slice(0, 150)}`);
   }
 
+  // ── Phase 3 multi-org (P3.2): workspace list + org-scoped CRUD ────────────
+  // The smoke user survives across runs, so every org count here is RELATIVE
+  // (before/after), never absolute. Org B is explicitly deleted at the end of
+  // this section (org delete cascades members/brands/drafts/events/settings).
+  console.log('\n─── Test 14b: multi-org — /api/orgs, x-org-id scoping, targeted import ───');
+  let orgBId = null;
+  {
+    // (a) without JWT → 401
+    const noAuth = await fetch(`${BASE}/api/orgs`);
+    const noAuthBody = await jsonSafe(noAuth);
+    assert('orgs without JWT → 401', noAuth.status === 401, `status=${noAuth.status}`);
+    assert('orgs 401 error UNAUTHORIZED', noAuthBody.error === 'UNAUTHORIZED', `error=${noAuthBody.error}`);
+
+    // (b) with JWT → 200 + memberships with owner role
+    const r1 = await fetch(`${BASE}/api/orgs`, { headers: { Authorization: `Bearer ${jwt}` } });
+    const b1 = await jsonSafe(r1);
+    const countBefore = Array.isArray(b1.orgs) ? b1.orgs.length : -1;
+    assert('orgs with JWT → 200', r1.status === 200, `status=${r1.status}`);
+    assert('orgs array present', Array.isArray(b1.orgs), `type=${typeof b1.orgs}`);
+    assert('at least one membership (workspace from Test 12)', countBefore >= 1, `count=${countBefore}`);
+    assert('membership role is owner', b1.orgs?.[0]?.role === 'owner', `role=${b1.orgs?.[0]?.role}`);
+    assert('org carries name + timezone', typeof b1.orgs?.[0]?.name === 'string' && typeof b1.orgs?.[0]?.defaultTimezone === 'string', `org=${JSON.stringify(b1.orgs?.[0] ?? {}).slice(0, 120)}`);
+
+    // (c) create a SECOND org through create_organization RPC as the user
+    const userScoped = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+      global: { headers: { Authorization: `Bearer ${jwt}` } },
+    });
+    const { data: newOrgId, error: orgErr } = await userScoped.rpc('create_organization', {
+      p_name: `Smoke Org B ${Date.now()}`,
+      p_slug: `smoke-org-b-${Date.now()}`,
+      p_timezone: 'Asia/Karachi',
+    });
+    assert('create_organization RPC succeeded', !orgErr && typeof newOrgId === 'string', `error=${orgErr?.message ?? ''}`);
+    orgBId = typeof newOrgId === 'string' ? newOrgId : null;
+
+    if (orgBId) {
+      // (d) the list now shows BOTH workspaces
+      const r2 = await fetch(`${BASE}/api/orgs`, { headers: { Authorization: `Bearer ${jwt}` } });
+      const b2 = await jsonSafe(r2);
+      assert('orgs count increased by 1', Array.isArray(b2.orgs) && b2.orgs.length === countBefore + 1, `before=${countBefore}, after=${b2.orgs?.length}`);
+
+      // (e) CRUD targeted at org B works and lands in org B
+      const brandBody = {
+        name: `MultiOrg Brand ${Date.now()}`,
+        tagline: 'org b probe',
+        industry: 'Tech',
+        targetAudience: 'QA',
+        brandVoice: { tone: 'Direct', bannedWords: [], styleGuidelines: '', sampleCopy: '' },
+        preferredLanguage: 'English',
+        productsAndServices: [{ name: 'Widget' }],
+      };
+      const rc = await fetch(`${BASE}/api/brands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}`, 'x-org-id': orgBId },
+        body: JSON.stringify(brandBody),
+      });
+      const bc = await jsonSafe(rc);
+      assert('CRUD with x-org-id=orgB → 201', rc.status === 201, `status=${rc.status}`);
+      assert('created brand row carries org B org_id', bc.org_id === orgBId, `org_id=${bc.org_id}`);
+
+      // (f) non-member org → 403 (RLS returns zero rows; existence never leaked)
+      const rf = await fetch(`${BASE}/api/brands`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${jwt}`,
+          'x-org-id': '00000000-0000-4000-8000-000000000000',
+        },
+        body: JSON.stringify(brandBody),
+      });
+      const bf = await jsonSafe(rf);
+      assert('CRUD with foreign x-org-id → 403', rf.status === 403, `status=${rf.status}`);
+      assert('403 error FORBIDDEN_ORG', bf.error === 'FORBIDDEN_ORG', `error=${bf.error}`);
+
+      // (g) malformed header → 400 before any DB work
+      const rm = await fetch(`${BASE}/api/brands`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${jwt}`,
+          'x-org-id': 'not-a-uuid',
+        },
+        body: JSON.stringify(brandBody),
+      });
+      const bm = await jsonSafe(rm);
+      assert('CRUD with non-UUID x-org-id → 400', rm.status === 400, `status=${rm.status}`);
+      assert('400 error INVALID_ORG_ID', bm.error === 'INVALID_ORG_ID', `error=${bm.error}`);
+
+      // (h) import TARGETS the active workspace when the header is present
+      const importFile = {
+        formatVersion: 1,
+        exportedAt: `2026-11-10T00:00:0${Math.floor(Math.random() * 10)}.000Z`,
+        source: 'localStorage',
+        data: {
+          brands: [{
+            id: `orgb-brand-${Date.now()}`,
+            name: `Org B Import Brand ${Date.now()}`,
+            tagline: '', industry: 'Tech', targetAudience: '',
+            brandVoice: { tone: '', bannedWords: [], styleGuidelines: '', sampleCopy: '' },
+            preferredLanguage: 'English',
+            productsAndServices: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }],
+          drafts: [],
+          calendarEvents: [],
+          settings: { workspaceName: 'Org B Import', defaultBrandId: 'orgb-brand-1', defaultLanguage: 'English', timezone: 'Asia/Karachi (PKT, UTC+5)', enableFluffHighlighting: true, autoSaveDrafts: true },
+          activeBrandId: `orgb-brand-${Date.now()}`,
+        },
+      };
+      const ri = await fetch(`${BASE}/api/workspace/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}`, 'x-org-id': orgBId },
+        body: JSON.stringify(importFile),
+      });
+      const bi = await jsonSafe(ri);
+      assert('import with x-org-id=orgB → 201/207', ri.status === 201 || ri.status === 207, `status=${ri.status}`);
+      assert('import report targets org B', bi.orgId === orgBId, `orgId=${bi.orgId}`);
+      assert('import lands in caller workspace (no get-or-create)', Array.isArray(bi.notes) && bi.notes.some(n => /active workspace/i.test(n)), `notes=${JSON.stringify(bi.notes ?? []).slice(0, 150)}`);
+
+      // (i) export still exposes every workspace (frontend switcher data source)
+      const re = await fetch(`${BASE}/api/workspace/export`, { headers: { Authorization: `Bearer ${jwt}` } });
+      const be = await jsonSafe(re);
+      assert('export workspaces count == orgs count', Array.isArray(be.workspaces) && be.workspaces.length === countBefore + 1, `workspaces=${be.workspaces?.length}, expected=${countBefore + 1}`);
+
+      // (j) org B deletion cascades everything created in this section
+      const admin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+      const { error: delErr } = await admin.from('organizations').delete().eq('id', orgBId);
+      assert('org B cleanup delete succeeded', !delErr, `error=${delErr?.message ?? ''}`);
+      orgBId = null;
+    }
+  }
+
   console.log('\n─── Test 15: /api/auth/logout with JWT + refreshToken revokes the session ───');
   {
     const res = await fetch(`${BASE}/api/auth/logout`, {

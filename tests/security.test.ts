@@ -490,6 +490,41 @@ async function runAllTests(): Promise<boolean> {
     };
   });
 
+  // 8i-bis. Phase 3 multi-org: the workspace list and org-scoped CRUD are
+  // gated by the same requireSupabaseAuth middleware — in local mode they
+  // must be honest 501s too, and the mode gate must fire BEFORE any
+  // x-org-id validation (no header-specific errors leak the gate order).
+  await assertTest('Orgs List Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs`);
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — /api/orgs requires Supabase mode like every workspace route',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Org-Scoped CRUD Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/brands`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-org-id': '00000000-0000-4000-8000-000000000000',
+      },
+      body: JSON.stringify({ name: 'Local Mode Probe' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL before x-org-id validation — mode gate first, always',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
   // 8j. Auth endpoints honest 501 in LOCAL storage mode
   // The browser-facing auth routes (/api/auth/signup, /login, /logout, /me)
   // must NOT fake a session when Supabase is not configured. They return 501

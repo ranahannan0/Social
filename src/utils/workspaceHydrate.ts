@@ -158,6 +158,13 @@ export interface HydratedWorkspace {
   organizationName: string | null;
 }
 
+/** Lightweight org descriptor for the workspace switcher UI (P3.2). */
+export interface OrgSummary {
+  id: string;
+  name: string;
+  defaultTimezone: string | null;
+}
+
 export class HydrateError extends Error {}
 
 /** Map a single DB brand row to the frontend BrandProfile shape. */
@@ -242,14 +249,43 @@ function mapEvent(e: DbEvent): CalendarEvent | null {
 }
 
 /**
+ * Pure: pull the list of workspaces (organizations) out of an export payload
+ * for the workspace switcher. Unknown shapes are tolerated — anything that
+ * does not look like an org is skipped rather than thrown.
+ */
+export function listOrgsFromExport(raw: unknown): OrgSummary[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const workspaces = (raw as { workspaces?: unknown }).workspaces;
+  if (!Array.isArray(workspaces)) return [];
+  const orgs: OrgSummary[] = [];
+  for (const ws of workspaces) {
+    if (!ws || typeof ws !== 'object') continue;
+    const org = (ws as { organization?: unknown }).organization;
+    if (!org || typeof org !== 'object') continue;
+    const id = (org as { id?: unknown }).id;
+    if (typeof id !== 'string' || id.length === 0) continue;
+    const tz = (org as { default_timezone?: unknown }).default_timezone;
+    orgs.push({
+      id,
+      name: typeof (org as { name?: unknown }).name === 'string' ? (org as { name: string }).name : 'Workspace',
+      defaultTimezone: typeof tz === 'string' ? tz : null,
+    });
+  }
+  return orgs;
+}
+
+/**
  * Map the entire /api/workspace/export response to a HydratedWorkspace.
  * If `workspaces` is empty (newly-signed-up user with no org yet), returns
  * a null `organizationId` so the caller can decide whether to seed.
  *
- * When more than one workspace is returned, the FIRST is used (Phase 2
- * design assumes one org per user; multi-org support is deferred).
+ * Phase 3 multi-org: when `requestedOrgId` is given, the workspace whose
+ * organization.id matches is hydrated (workspace switcher). No match →
+ * falls back to the first workspace defensively (the orgs list comes from
+ * the same payload, so a mismatch means the org vanished mid-switch — the
+ * caller re-lists orgs after every export anyway).
  */
-export function hydrateWorkspaceFromExport(raw: unknown): HydratedWorkspace {
+export function hydrateWorkspaceFromExport(raw: unknown, requestedOrgId?: string): HydratedWorkspace {
   if (!raw || typeof raw !== 'object') {
     throw new HydrateError('Export response is not an object.');
   }
@@ -268,7 +304,11 @@ export function hydrateWorkspaceFromExport(raw: unknown): HydratedWorkspace {
       organizationName: null,
     };
   }
-  const ws = r.workspaces[0] as DbWorkspaceExport['workspaces'][number];
+  const workspaceList = r.workspaces as DbWorkspaceExport['workspaces'];
+  const ws =
+    (requestedOrgId
+      ? workspaceList.find(w => w?.organization?.id === requestedOrgId)
+      : undefined) ?? workspaceList[0];
   const org = ws.organization ?? { id: '' };
   // Organization timezone drives ALL naive↔UTC conversions for this workspace
   // (draft scheduledDate + event date/time). Corrupt values fall back to UTC.
