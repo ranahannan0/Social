@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
+import { roleBadgeLabel } from '../../utils/orgRoles';
 import { useAuth } from '../../context/AuthContext';
 import { apiService, AiStatusResponse } from '../../services/api';
 import {
@@ -43,6 +44,7 @@ export const SettingsView: React.FC = () => {
     retryPendingSync,
     orgs,
     activeOrgId,
+    activeRole,
     switchOrg,
   } = useApp();
   const { user, signOut } = useAuth();
@@ -187,6 +189,57 @@ export const SettingsView: React.FC = () => {
       {/* Tab 1: App Settings */}
       {activeTab === 'app' && (
         <form onSubmit={handleSaveSettings} className="space-y-6">
+          {/* Auto-sync (Stage B) — moved here in P3.3 so sync status is visible
+              on the DEFAULT tab instead of hiding behind the Supabase tab */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                  <CloudCog className="w-4 h-4 text-zinc-400" />
+                  <span>Auto-sync</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold">STAGE B · LIVE</span>
+                </h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  Every create, edit and delete saves to the cloud automatically — no button needed.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {syncState.pending > 0 ? (
+                  <span className="text-xs px-3 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300 font-medium flex items-center gap-1.5">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    {syncState.pending} pending
+                  </span>
+                ) : (
+                  <span className="text-xs px-3 py-1.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 font-medium flex items-center gap-1.5">
+                    <Check className="w-3.5 h-3.5" />
+                    All saved
+                  </span>
+                )}
+                {syncState.pending > 0 && (
+                  <button
+                    type="button"
+                    onClick={retryPendingSync}
+                    className="text-xs px-3 py-1.5 rounded-md border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors"
+                  >
+                    Retry
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {syncState.lastError && (
+              <div className="text-xs flex items-start gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-300">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <div className="font-medium">A change could not be saved to the cloud</div>
+                  <div className="mt-0.5 text-red-400/90">{syncState.lastError}</div>
+                  <div className="mt-1 text-zinc-400">
+                    Pending changes retry automatically. “Full sync” below can also repair everything.
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
             <div className="border-b border-zinc-800 pb-3">
               <h3 className="text-sm font-semibold text-zinc-100">Workspace Configuration</h3>
@@ -506,57 +559,6 @@ export const SettingsView: React.FC = () => {
             </div>
           </div>
 
-          {/* Auto-sync (Stage B) */}
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                  <CloudCog className="w-4 h-4 text-zinc-400" />
-                  <span>Auto-sync</span>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold">STAGE B · LIVE</span>
-                </h3>
-                <p className="text-xs text-zinc-500 mt-1">
-                  Every create, edit and delete saves to the cloud automatically — no button needed.
-                </p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                {syncState.pending > 0 ? (
-                  <span className="text-xs px-3 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300 font-medium flex items-center gap-1.5">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    {syncState.pending} pending
-                  </span>
-                ) : (
-                  <span className="text-xs px-3 py-1.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 font-medium flex items-center gap-1.5">
-                    <Check className="w-3.5 h-3.5" />
-                    All saved
-                  </span>
-                )}
-                {syncState.pending > 0 && (
-                  <button
-                    type="button"
-                    onClick={retryPendingSync}
-                    className="text-xs px-3 py-1.5 rounded-md border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors"
-                  >
-                    Retry
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {syncState.lastError && (
-              <div className="text-xs flex items-start gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-300">
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <div className="flex-1">
-                  <div className="font-medium">A change could not be saved to the cloud</div>
-                  <div className="mt-0.5 text-red-400/90">{syncState.lastError}</div>
-                  <div className="mt-1 text-zinc-400">
-                    Pending changes retry automatically. “Full sync” below can also repair everything.
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
           {/* Workspaces (Phase 3 multi-org) */}
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -608,6 +610,15 @@ export const SettingsView: React.FC = () => {
                       <div className="text-sm text-zinc-100 font-medium truncate">{o.name}</div>
                       <div className="text-xs text-zinc-500 truncate">{o.defaultTimezone ?? 'UTC'}</div>
                     </div>
+                    {o.role && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold shrink-0 ${
+                        o.role === 'viewer'
+                          ? 'bg-amber-500/15 text-amber-400'
+                          : 'bg-zinc-800/90 text-zinc-300'
+                      }`}>
+                        {roleBadgeLabel(o.role)}
+                      </span>
+                    )}
                     {isActive && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold shrink-0">
                         ACTIVE
@@ -622,6 +633,19 @@ export const SettingsView: React.FC = () => {
                 </div>
               )}
             </div>
+
+            {activeRole === 'viewer' && (
+              <div className="text-xs flex items-start gap-2 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-300">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <div className="font-medium">Read-only workspace</div>
+                  <div className="mt-0.5 text-amber-400/90">
+                    Your role here is viewer — creating and editing is disabled. Switch to a
+                    workspace where you have editor access, or ask an admin to upgrade you.
+                  </div>
+                </div>
+              </div>
+            )}
 
             {switchOrgError && (
               <div className="text-xs flex items-start gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-300">

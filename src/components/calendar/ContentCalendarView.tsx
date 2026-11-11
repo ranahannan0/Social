@@ -21,7 +21,7 @@ import {
 type CalendarViewMode = 'month' | 'week' | 'day';
 
 export const ContentCalendarView: React.FC = () => {
-  const { calendarEvents, addCalendarEvent, deleteCalendarEvent, drafts, brands, activeBrandId } = useApp();
+  const { calendarEvents, addCalendarEvent, deleteCalendarEvent, drafts, brands, activeBrandId, canWrite } = useApp();
 
   const [viewMode, setViewMode] = useState<CalendarViewMode>('month');
   // Opens on the ACTUAL current date (audit item B-3: was frozen at Nov 2026).
@@ -187,7 +187,9 @@ export const ContentCalendarView: React.FC = () => {
 
             <button
               onClick={() => setIsAddModalOpen(true)}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
+              disabled={!canWrite}
+              title={canWrite ? undefined : 'Viewer role — this workspace is read-only'}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Schedule Event</span>

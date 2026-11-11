@@ -21,6 +21,7 @@ import type {
   HookType,
 } from '../types';
 import { utcIsoToLocalNaive, isValidTimezone } from './tzConvert';
+import type { OrgRole } from './orgRoles';
 
 const KNOWN_PLATFORMS: PlatformType[] = [
   'linkedin', 'x', 'instagram_reels', 'instagram_feed', 'youtube',
@@ -163,6 +164,12 @@ export interface OrgSummary {
   id: string;
   name: string;
   defaultTimezone: string | null;
+  /**
+   * P3.3: caller's role in this org (mirrors public.org_role). The export
+   * endpoint does not carry membership data, so this starts undefined and is
+   * merged in by AppContext from GET /api/orgs — see refreshOrgRoles().
+   */
+  role?: OrgRole | null;
 }
 
 export class HydrateError extends Error {}

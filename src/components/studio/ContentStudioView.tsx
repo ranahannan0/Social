@@ -45,7 +45,7 @@ const LANGUAGES: SupportedLanguage[] = [
 ];
 
 export const ContentStudioView: React.FC = () => {
-  const { activeBrand, saveDraft, setActiveSection, settings } = useApp();
+  const { activeBrand, saveDraft, setActiveSection, settings, canWrite } = useApp();
 
   // Generator inputs
   const [topic, setTopic] = useState('');
@@ -209,6 +209,7 @@ export const ContentStudioView: React.FC = () => {
   };
 
   const handleSaveToLibrary = (status: 'draft' | 'ready') => {
+    if (!canWrite) return; // P3.3: viewer role — RLS would reject the POST anyway
     if (!caption.trim()) return;
 
     const draft = saveDraft({
@@ -711,7 +712,9 @@ export const ContentStudioView: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => handleSaveToLibrary('draft')}
-                      className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium rounded-lg border border-zinc-700 transition-colors"
+                      disabled={!canWrite}
+                      title={canWrite ? undefined : 'Viewer role — this workspace is read-only'}
+                      className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium rounded-lg border border-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       Save as Draft
                     </button>
@@ -719,13 +722,17 @@ export const ContentStudioView: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => handleSaveToLibrary('ready')}
-                      className="px-3.5 py-2 bg-teal-700 hover:bg-teal-600 text-white text-xs font-medium rounded-lg transition-colors"
+                      disabled={!canWrite}
+                      title={canWrite ? undefined : 'Viewer role — this workspace is read-only'}
+                      className="px-3.5 py-2 bg-teal-700 hover:bg-teal-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       Mark Ready
                     </button>
 
                     <button
                       type="button"
+                      disabled={!canWrite}
+                      title={canWrite ? undefined : 'Viewer role — this workspace is read-only'}
                       onClick={() => {
                         // Ensure it's saved first
                         const draftToSchedule =

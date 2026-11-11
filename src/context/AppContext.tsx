@@ -34,6 +34,7 @@ import {
   type SyncTask,
 } from '../services/cloudSync';
 import { hydrateWorkspaceFromExport, listOrgsFromExport, HydrateError, type OrgSummary } from '../utils/workspaceHydrate';
+import { canWriteRole, isOrgRole, roleForOrg, type OrgRole } from '../utils/orgRoles';
 import {
   WORKSPACE_EXPORT_FORMAT_VERSION,
   validateWorkspaceExport,
@@ -92,6 +93,10 @@ interface AppContextType {
    * Throws on network/server error; state is left untouched on failure.
    */
   switchOrg: (orgId: string) => Promise<void>;
+  /** P3.3: caller's role in the active workspace (null = unknown/local mode). */
+  activeRole: OrgRole | null;
+  /** P3.3: UI mirror of the DB can_write() policy for the active workspace. */
+  canWrite: boolean;
   stats: {
     totalDrafts: number;
     readyDrafts: number;
@@ -146,6 +151,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // UI and the network layer never disagree.
   const [orgs, setOrgs] = useState<OrgSummary[]>([]);
   const [activeOrgIdState, setActiveOrgIdState] = useState<string | null>(null);
+
+  // P3.3: the active workspace's role drives the UI read-only state. Before
+  // roles are merged (or in local mode) this is null → treated as writable;
+  // the server-side RLS remains the real write gate either way.
+  const activeRole = roleForOrg(orgs, activeOrgIdState);
+  const canWrite = canWriteRole(activeRole);
 
   // Load from LocalStorage with clean initial fallback
   // Seed factories build dates relative to the actual current date, so the
@@ -213,6 +224,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }
 
+  /**
+   * P3.3: best-effort fetch of GET /api/orgs to learn the caller's role in
+   * each workspace (the export endpoint carries no membership data). Roles
+   * are merged into the orgs list; a failure here is never fatal — the
+   * server-side RLS remains the real write gate regardless.
+   */
+  async function refreshOrgRoles(): Promise<void> {
+    try {
+      const res = await authedFetch('/api/orgs');
+      if (!res.ok) return;
+      const body = await res.json();
+      const rows: unknown = body?.orgs;
+      if (!Array.isArray(rows)) return;
+      const roleByOrg = new Map<string, OrgRole>();
+      for (const row of rows) {
+        const r = row as { id?: unknown; role?: unknown };
+        if (typeof r.id === 'string' && isOrgRole(r.role)) roleByOrg.set(r.id, r.role);
+      }
+      if (roleByOrg.size === 0) return;
+      setOrgs(prev =>
+        prev.map(o => (roleByOrg.has(o.id) ? { ...o, role: roleByOrg.get(o.id) } : o)),
+      );
+    } catch {
+      // Role merge is advisory UI state only — ignore failures quietly.
+    }
+  }
+
   /** Fetch the cloud workspace and replace local state with it (UUID adoption). */
   async function fetchAndApplyCloudWorkspace(): Promise<void> {
     const res = await authedFetch('/api/workspace/export');
@@ -234,6 +272,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setOrgs(listOrgsFromExport(data));
     setActiveOrgIdState(hydrated.organizationId);
     setActiveOrgId(hydrated.organizationId);
+    void refreshOrgRoles(); // P3.3: merge roles for the read-only UI (best effort)
   }
 
   /**
@@ -274,6 +313,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setHydrationStatus('ready');
       setLastSyncAt(new Date().toISOString());
       setLastSyncSummary(`Switched to workspace “${hydrated.organizationName ?? orgId}”.`);
+      void refreshOrgRoles(); // P3.3: roles for the freshly-targeted workspace
     } catch (err) {
       // Restore the previous selection so the network layer keeps targeting
       // the workspace the UI still shows.
@@ -339,6 +379,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setActiveOrgId(hydrated.organizationId);
         retireLocalStorage();
         setHydrationStatus('ready');
+        void refreshOrgRoles(); // P3.3: merge roles once the workspace is live
       } catch (err) {
         if (cancelled) return;
         console.warn('[AppContext] hydration failed:', err);
@@ -807,6 +848,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         retryPendingSync: retrySync,
         orgs,
         activeOrgId: activeOrgIdState,
+        activeRole,
+        canWrite,
         switchOrg,
         stats,
       }}

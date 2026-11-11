@@ -34,6 +34,7 @@ export const BrandWorkspaceView: React.FC = () => {
     setActiveSection,
     drafts,
     calendarEvents,
+    canWrite,
   } = useApp();
 
   const activeBrand = brands.find(b => b.id === activeBrandId) || brands[0];
@@ -67,6 +68,7 @@ export const BrandWorkspaceView: React.FC = () => {
   }, [activeBrandId, activeBrand]);
 
   const handleStartCreateNew = () => {
+    if (!canWrite) return; // P3.3: viewer role — RLS would reject the POST anyway
     const blankBrand: BrandProfile = {
       id: `temp-${Date.now()}`,
       name: 'New Brand Space',
@@ -213,7 +215,9 @@ export const BrandWorkspaceView: React.FC = () => {
 
           <button
             onClick={handleStartCreateNew}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors shrink-0 ${
+            disabled={!canWrite}
+            title={canWrite ? undefined : 'Viewer role — this workspace is read-only'}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${
               isCreatingNew
                 ? 'bg-emerald-600 text-white'
                 : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'

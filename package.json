@@ -11,7 +11,7 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "npm run test:unit && npm run test:integration",
-    "test:unit": "node --import tsx --test tests/unit/tzConvert.test.ts tests/unit/workspaceImportMapper.test.ts tests/unit/workspaceExport.test.ts tests/unit/dateUtils.test.ts tests/unit/dataIntegrity.test.ts tests/unit/crudMappers.test.ts tests/unit/tokenRefresh.test.ts tests/unit/multiOrgHydrate.test.ts",
+    "test:unit": "node --import tsx --test tests/unit/tzConvert.test.ts tests/unit/workspaceImportMapper.test.ts tests/unit/workspaceExport.test.ts tests/unit/dateUtils.test.ts tests/unit/dataIntegrity.test.ts tests/unit/crudMappers.test.ts tests/unit/tokenRefresh.test.ts tests/unit/multiOrgHydrate.test.ts tests/unit/orgRoles.test.ts",
     "test:integration": "tsx tests/runIntegration.ts",
     "test:db": "node scripts/db/runLocal.mjs"
   },

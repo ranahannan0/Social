@@ -428,6 +428,9 @@ async function main() {
       const r2 = await fetch(`${BASE}/api/orgs`, { headers: { Authorization: `Bearer ${jwt}` } });
       const b2 = await jsonSafe(r2);
       assert('orgs count increased by 1', Array.isArray(b2.orgs) && b2.orgs.length === countBefore + 1, `before=${countBefore}, after=${b2.orgs?.length}`);
+      // P3.3: the role data the frontend read-only UI depends on.
+      assert('org B listed with role owner (creator = owner)', b2.orgs?.some(o => o.id === orgBId && o.role === 'owner'), `roles=${JSON.stringify(b2.orgs?.map(o => `${o.id.slice(0, 8)}:${o.role}`))}`);
+      assert('every membership role is a valid org_role', (b2.orgs ?? []).every(o => ['owner', 'admin', 'editor', 'viewer'].includes(o.role)), `roles=${JSON.stringify(b2.orgs?.map(o => o.role))}`);
 
       // (e) CRUD targeted at org B works and lands in org B
       const brandBody = {
