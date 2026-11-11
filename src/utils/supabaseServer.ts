@@ -152,6 +152,18 @@ export async function getUserScopedClient(jwt: string) {
 }
 
 /**
+ * Service-role admin client (server-only). Null when only the anon key is
+ * configured. Used exclusively for the lookups RLS cannot express — e.g.
+ * P3.4 member management needs a user id for an email address, and auth
+ * users are invisible to ordinary JWTs by design. Read-only usage only:
+ * all writes still flow through the caller's RLS-scoped client.
+ */
+export async function getAdminClient(): Promise<import('@supabase/supabase-js').SupabaseClient | null> {
+  if (!(await ensureClients())) return null;
+  return clients.admin;
+}
+
+/**
  * Resolves the caller's workspace (organization) through a USER-SCOPED
  * client, so RLS guarantees only member orgs are visible. Default rule
  * (no org requested): the FIRST org by created_at wins — the same rule the

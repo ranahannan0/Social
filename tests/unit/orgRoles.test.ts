@@ -8,7 +8,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { canWriteRole, isOrgRole, roleBadgeLabel, roleForOrg } from '../../src/utils/orgRoles';
+import { ASSIGNABLE_MEMBER_ROLES, canManageMembers, canWriteRole, isOrgRole, roleBadgeLabel, roleForOrg } from '../../src/utils/orgRoles';
 import type { OrgSummary } from '../../src/utils/workspaceHydrate';
 
 function org(id: string, role?: OrgSummary['role']): OrgSummary {
@@ -83,4 +83,23 @@ test('canWriteRole: unknown role (null) → writable, RLS is the real gate', () 
 test('roleBadgeLabel: uppercase badge text', () => {
   assert.equal(roleBadgeLabel('owner'), 'OWNER');
   assert.equal(roleBadgeLabel('viewer'), 'VIEWER');
+});
+
+// ── canManageMembers (mirror of the members_* RLS policies) ────────────────
+
+test('canManageMembers: admins and owners manage the roster', () => {
+  assert.equal(canManageMembers('admin'), true);
+  assert.equal(canManageMembers('owner'), true);
+});
+
+test('canManageMembers: editors, viewers and unknown roles cannot', () => {
+  assert.equal(canManageMembers('editor'), false);
+  assert.equal(canManageMembers('viewer'), false);
+  assert.equal(canManageMembers(null), false);
+});
+
+test('ASSIGNABLE_MEMBER_ROLES: owner is deliberately not assignable', () => {
+  // Ownership transfer is a dedicated flow, never a dropdown value.
+  assert.ok(!ASSIGNABLE_MEMBER_ROLES.includes('owner'));
+  assert.deepEqual([...ASSIGNABLE_MEMBER_ROLES], ['admin', 'editor', 'viewer']);
 });

@@ -51,3 +51,24 @@ export function canWriteRole(role: OrgRole | null): boolean {
 export function roleBadgeLabel(role: OrgRole): string {
   return role.toUpperCase();
 }
+
+/**
+ * Mirror of the organization_members RLS policies (can_admin): admins and
+ * owners manage the roster; editors and viewers can only see it. Null
+ * (local mode / unknown) → false — the members card simply does not render.
+ */
+export function canManageMembers(role: OrgRole | null): boolean {
+  return role === 'admin' || role === 'owner';
+}
+
+/** Roster row shape returned by GET /api/orgs/:orgId/members (P3.4). */
+export interface OrgMember {
+  userId: string;
+  email: string | null;
+  role: OrgRole;
+  joinedAt: string | null;
+}
+
+/** Roles an admin may ASSIGN via the member endpoints (owner is not
+ * assignable — ownership transfer is a dedicated flow, not a dropdown). */
+export const ASSIGNABLE_MEMBER_ROLES: readonly OrgRole[] = ['admin', 'editor', 'viewer'];

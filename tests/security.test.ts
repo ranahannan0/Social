@@ -525,6 +525,66 @@ async function runAllTests(): Promise<boolean> {
     };
   });
 
+  // 8i-ter. P3.4 member endpoints: the same honest 501 in local mode — the
+  // requireSupabaseAuth middleware fires before any path/body validation.
+  await assertTest('Org Members List Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000/members`);
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — member roster requires Supabase mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Org Member Invite Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000/members`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'someone@example.com', role: 'viewer' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — inviting members requires Supabase mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Org Member Role Change Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000/members/00000000-0000-4000-8000-000000000009`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'editor' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — role changes require Supabase mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Org Member Removal Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000/members/00000000-0000-4000-8000-000000000009`, {
+      method: 'DELETE',
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — member removal requires Supabase mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
   // 8j. Auth endpoints honest 501 in LOCAL storage mode
   // The browser-facing auth routes (/api/auth/signup, /login, /logout, /me)
   // must NOT fake a session when Supabase is not configured. They return 501

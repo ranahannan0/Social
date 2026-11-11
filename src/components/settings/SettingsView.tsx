@@ -1,6 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '../../context/AppContext';
-import { roleBadgeLabel } from '../../utils/orgRoles';
+import {
+  ASSIGNABLE_MEMBER_ROLES,
+  canManageMembers,
+  roleBadgeLabel,
+  type OrgMember,
+} from '../../utils/orgRoles';
 import { useAuth } from '../../context/AuthContext';
 import { apiService, AiStatusResponse } from '../../services/api';
 import {
@@ -22,11 +27,14 @@ import {
   LogOut,
   Loader2,
   User,
+  Users,
+  Plus,
   Cloud,
   CloudOff,
   CloudCog,
 } from 'lucide-react';
 import { downloadWorkspaceExport } from '../../utils/workspaceExport';
+import { authedFetch } from '../../services/authClient';
 
 export const SettingsView: React.FC = () => {
   const {
@@ -66,6 +74,115 @@ export const SettingsView: React.FC = () => {
     switchOrg(orgId)
       .catch((e: Error) => setSwitchOrgError(e.message || 'Workspace switch failed.'))
       .finally(() => setSwitchingOrgId(null));
+  };
+
+  // ── P3.4: member management (admins/owners only) ──────────────────────
+  const [membersList, setMembersList] = useState<OrgMember[]>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [membersError, setMembersError] = useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<'admin' | 'editor' | 'viewer'>('editor');
+  const [inviting, setInviting] = useState(false);
+  const [memberBusyId, setMemberBusyId] = useState<string | null>(null);
+  const [membersMsg, setMembersMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const loadMembers = useCallback(async () => {
+    if (!activeOrgId) return;
+    setMembersLoading(true);
+    setMembersError(null);
+    try {
+      const res = await authedFetch(`/api/orgs/${activeOrgId}/members`);
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMembersList([]);
+        setMembersError(body?.message || `Failed to load members (status ${res.status}).`);
+        return;
+      }
+      setMembersList(Array.isArray(body.members) ? body.members : []);
+    } catch {
+      setMembersError('Network error while loading members.');
+    } finally {
+      setMembersLoading(false);
+    }
+  }, [activeOrgId]);
+
+  useEffect(() => {
+    if (activeOrgId && activeRole && canManageMembers(activeRole)) {
+      void loadMembers();
+    }
+  }, [activeOrgId, activeRole, loadMembers]);
+
+  const handleInviteMember = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeOrgId || inviting) return;
+    setInviting(true);
+    setMembersMsg(null);
+    try {
+      const res = await authedFetch(`/api/orgs/${activeOrgId}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMembersMsg({ ok: false, text: body?.message || `Could not add the member (status ${res.status}).` });
+        return;
+      }
+      setMembersMsg({ ok: true, text: `${inviteEmail.trim()} added as ${inviteRole}.` });
+      setInviteEmail('');
+      await loadMembers();
+    } catch {
+      setMembersMsg({ ok: false, text: 'Network error while adding the member.' });
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const handleMemberRoleChange = async (m: OrgMember, nextRole: string) => {
+    if (!activeOrgId || memberBusyId) return;
+    setMemberBusyId(m.userId);
+    setMembersMsg(null);
+    try {
+      const res = await authedFetch(`/api/orgs/${activeOrgId}/members/${m.userId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: nextRole }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMembersMsg({ ok: false, text: body?.message || `Role change failed (status ${res.status}).` });
+        await loadMembers(); // snap the select back to the server truth
+        return;
+      }
+      setMembersMsg({ ok: true, text: 'Role updated.' });
+      await loadMembers();
+    } catch {
+      setMembersMsg({ ok: false, text: 'Network error while changing the role.' });
+    } finally {
+      setMemberBusyId(null);
+    }
+  };
+
+  const handleRemoveMember = async (m: OrgMember) => {
+    if (!activeOrgId || memberBusyId) return;
+    setMemberBusyId(m.userId);
+    setMembersMsg(null);
+    try {
+      const res = await authedFetch(`/api/orgs/${activeOrgId}/members/${m.userId}`, {
+        method: 'DELETE',
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMembersMsg({ ok: false, text: body?.message || `Removal failed (status ${res.status}).` });
+        return;
+      }
+      setMembersMsg({ ok: true, text: 'Member removed.' });
+      await loadMembers();
+    } catch {
+      setMembersMsg({ ok: false, text: 'Network error while removing the member.' });
+    } finally {
+      setMemberBusyId(null);
+    }
   };
 
   const handleExportBackup = () => {
@@ -654,6 +771,112 @@ export const SettingsView: React.FC = () => {
               </div>
             )}
           </div>
+
+          {/* Team members (Phase 3.4) — roster management for admins/owners */}
+          {activeRole && canManageMembers(activeRole) && activeOrgId && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                  <Users className="w-4 h-4 text-zinc-400" />
+                  <span>Team members</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold">PHASE 3 · LIVE</span>
+                </h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  People with access to the ACTIVE workspace. Editors create and edit; viewers read only.
+                </p>
+              </div>
+
+              {membersLoading ? (
+                <div className="text-xs text-zinc-500 flex items-center gap-2 p-3">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading members…
+                </div>
+              ) : membersError ? (
+                <div className="text-xs flex items-start gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-300">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <div className="flex-1">{membersError}</div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {membersList.map(m => (
+                    <div key={m.userId} className="flex flex-col sm:flex-row sm:items-center gap-3 p-3 rounded-lg border border-zinc-800/80 bg-zinc-950">
+                      <div className="w-8 h-8 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center shrink-0">
+                        {m.role === 'owner' ? <User className="w-4 h-4 text-emerald-400" /> : <Users className="w-4 h-4 text-zinc-500" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-zinc-100 font-medium truncate">{m.email ?? `${m.userId.slice(0, 8)}…`}</div>
+                        <div className="text-xs text-zinc-500">
+                          {m.role === 'owner' ? 'Workspace owner' : m.joinedAt ? `Joined ${new Date(m.joinedAt).toLocaleDateString()}` : 'Member'}
+                        </div>
+                      </div>
+                      <select
+                        value={m.role}
+                        disabled={memberBusyId === m.userId || m.role === 'owner'}
+                        onChange={e => void handleMemberRoleChange(m, e.target.value)}
+                        title={m.role === 'owner' ? 'Ownership transfer is a dedicated flow' : undefined}
+                        className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-200 focus:outline-hidden focus:border-emerald-500 disabled:opacity-50"
+                      >
+                        {m.role === 'owner' && <option value="owner">OWNER</option>}
+                        {ASSIGNABLE_MEMBER_ROLES.map(r => (
+                          <option key={r} value={r}>{roleBadgeLabel(r)}</option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={memberBusyId === m.userId || m.role === 'owner'}
+                        onClick={() => void handleRemoveMember(m)}
+                        title={m.role === 'owner' ? 'The last owner cannot be removed' : undefined}
+                        className="text-xs px-2.5 py-1.5 rounded-md border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                      >
+                        {memberBusyId === m.userId ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Remove'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {membersMsg && (
+                <div className={`text-xs flex items-start gap-2 p-3 rounded-lg border ${
+                  membersMsg.ok
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                    : 'bg-red-500/10 border-red-500/30 text-red-300'
+                }`}>
+                  {membersMsg.ok ? <Check className="w-4 h-4 shrink-0 mt-0.5" /> : <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />}
+                  <div className="flex-1">{membersMsg.text}</div>
+                </div>
+              )}
+
+              <form onSubmit={e => void handleInviteMember(e)} className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="email"
+                  required
+                  value={inviteEmail}
+                  onChange={e => setInviteEmail(e.target.value)}
+                  placeholder="teammate@company.com"
+                  className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:outline-hidden focus:border-emerald-500"
+                />
+                <select
+                  value={inviteRole}
+                  onChange={e => setInviteRole(e.target.value as 'admin' | 'editor' | 'viewer')}
+                  className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-2 text-sm text-zinc-200 focus:outline-hidden focus:border-emerald-500"
+                >
+                  {ASSIGNABLE_MEMBER_ROLES.map(r => (
+                    <option key={r} value={r}>{roleBadgeLabel(r)}</option>
+                  ))}
+                </select>
+                <button
+                  type="submit"
+                  disabled={inviting}
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold transition-colors shrink-0 flex items-center justify-center gap-1.5"
+                >
+                  {inviting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                  <span>{inviting ? 'Adding…' : 'Add member'}</span>
+                </button>
+              </form>
+              <p className="text-[11px] text-zinc-600">
+                They must already have an account — email invitations to brand-new accounts land in a later phase.
+              </p>
+            </div>
+          )}
 
           {/* Sync to Cloud (full repair) */}
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">

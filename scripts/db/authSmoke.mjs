@@ -526,6 +526,175 @@ async function main() {
     }
   }
 
+  console.log('\n─── Test 14c: P3.4 members — invite, roster, roles, guards (live) ───');
+  {
+    // (a) a second REAL auth user via the service-role admin API
+    // (email_confirm: true so the app login flow works without email links).
+    const memberEmail = `omni-member-${Date.now()}@omnichannelplus.dev`;
+    const adminClient = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY,
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+    const { data: created, error: createErr } = await adminClient.auth.admin.createUser({
+      email: memberEmail,
+      password: TEST_PASSWORD,
+      email_confirm: true,
+    });
+    assert('admin.createUser for member B succeeded', !createErr && !!created?.user?.id, `error=${createErr?.message ?? ''}`);
+    const memberUserId = created?.user?.id ?? null;
+    if (memberUserId) createdTestUserIds.push(memberUserId);
+
+    // (b) login B through the app's own auth flow
+    let memberJwt = null;
+    {
+      const res = await fetch(`${BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: memberEmail, password: TEST_PASSWORD }),
+      });
+      const body = await jsonSafe(res);
+      assert('member B app login → 200', res.status === 200, `status=${res.status}`);
+      memberJwt = body.session?.accessToken ?? null;
+    }
+
+    // (c) fresh org C owned by the primary smoke user (A)
+    const scopedA = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+      global: { headers: { Authorization: `Bearer ${jwt}` } },
+    });
+    const { data: orgCId, error: orgCErr } = await scopedA.rpc('create_organization', {
+      p_name: `Smoke Org C ${Date.now()}`,
+      p_slug: `smoke-org-c-${Date.now()}`,
+      p_timezone: 'Asia/Karachi', // the RPC's validator rejects bare 'UTC'
+    });
+    assert('create_organization RPC (org C) succeeded', !orgCErr && typeof orgCId === 'string', `error=${orgCErr?.message ?? ''}`);
+
+    if (memberJwt && memberUserId && typeof orgCId === 'string' && orgCId) {
+      // (d) B is not a member: roster read → 403, org existence never leaked
+      const g1 = await fetch(`${BASE}/api/orgs/${orgCId}/members`, { headers: { Authorization: `Bearer ${memberJwt}` } });
+      const gb1 = await jsonSafe(g1);
+      assert('non-member roster read → 403', g1.status === 403, `status=${g1.status}`);
+      assert('403 error FORBIDDEN_ORG', gb1.error === 'FORBIDDEN_ORG', `error=${gb1.error}`);
+
+      // (e) B (non-member) tries to manage → 403 (same code as non-admin
+      // members — no way to probe org existence from these endpoints)
+      const p1 = await fetch(`${BASE}/api/orgs/${orgCId}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}` },
+        body: JSON.stringify({ email: memberEmail, role: 'viewer' }),
+      });
+      assert('non-member invite attempt → 403', p1.status === 403, `status=${p1.status}`);
+
+      // (f) owner is not assignable via the dropdown endpoints
+      const p2 = await fetch(`${BASE}/api/orgs/${orgCId}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ email: memberEmail, role: 'owner' }),
+      });
+      const gb2 = await jsonSafe(p2);
+      assert('assigning owner → 400 INVALID_ROLE', p2.status === 400 && gb2.error === 'INVALID_ROLE', `status=${p2.status}, error=${gb2.error}`);
+
+      // (g) unknown email → 404 USER_NOT_FOUND (honest: ask them to sign up)
+      const p3 = await fetch(`${BASE}/api/orgs/${orgCId}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ email: `nobody-${Date.now()}@invalid.example`, role: 'viewer' }),
+      });
+      const gb3 = await jsonSafe(p3);
+      assert('unknown email → 404 USER_NOT_FOUND', p3.status === 404 && gb3.error === 'USER_NOT_FOUND', `status=${p3.status}, error=${gb3.error}`);
+
+      // (h) A invites B as viewer → 201
+      const p4 = await fetch(`${BASE}/api/orgs/${orgCId}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ email: memberEmail, role: 'viewer' }),
+      });
+      const gb4 = await jsonSafe(p4);
+      assert('invite B as viewer → 201', p4.status === 201, `status=${p4.status}`);
+      assert('invite response carries userId + role', gb4.member?.userId === memberUserId && gb4.member?.role === 'viewer', `member=${JSON.stringify(gb4.member ?? {})}`);
+
+      // (i) duplicate invite → 409
+      const p5 = await fetch(`${BASE}/api/orgs/${orgCId}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ email: memberEmail, role: 'viewer' }),
+      });
+      const gb5 = await jsonSafe(p5);
+      assert('duplicate invite → 409 ALREADY_MEMBER', p5.status === 409 && gb5.error === 'ALREADY_MEMBER', `status=${p5.status}, error=${gb5.error}`);
+
+      // (j) END-TO-END: B now sees org C in /api/orgs with role viewer
+      const o1 = await fetch(`${BASE}/api/orgs`, { headers: { Authorization: `Bearer ${memberJwt}` } });
+      const ob1 = await jsonSafe(o1);
+      assert('member B sees org C with role viewer', ob1.orgs?.some(o => o.id === orgCId && o.role === 'viewer'), `orgs=${JSON.stringify(ob1.orgs?.map(o => o.role))}`);
+
+      // (k) roster as B (viewer): 200, 2 rows, NO email enrichment (PII gate)
+      const g2 = await fetch(`${BASE}/api/orgs/${orgCId}/members`, { headers: { Authorization: `Bearer ${memberJwt}` } });
+      const gb6 = await jsonSafe(g2);
+      assert('viewer member roster read → 200', g2.status === 200, `status=${g2.status}`);
+      assert('roster has 2 members', Array.isArray(gb6.members) && gb6.members.length === 2, `count=${gb6.members?.length}`);
+      assert('viewer sees NO email addresses (PII gate)', Array.isArray(gb6.members) && gb6.members.every(m => m.email === null), `emails=${JSON.stringify(gb6.members?.map(m => m.email))}`);
+
+      // (k2) roster as A (owner): emails enriched
+      const g3 = await fetch(`${BASE}/api/orgs/${orgCId}/members`, { headers: { Authorization: `Bearer ${jwt}` } });
+      const gb7 = await jsonSafe(g3);
+      assert('owner roster shows member email', gb7.members?.some(m => m.email === memberEmail), `emails=${JSON.stringify(gb7.members?.map(m => m.email))}`);
+
+      // (l) viewer CANNOT write in org C (can_write RLS — the P3.3 UI
+      // gate's server mirror; the CRUD route maps the refusal to 422)
+      const brandBody = {
+        name: `Viewer Write Probe ${Date.now()}`,
+        tagline: 'x', industry: 'Tech', targetAudience: 'QA',
+        brandVoice: { tone: 'Direct', bannedWords: [], styleGuidelines: '', sampleCopy: '' },
+        preferredLanguage: 'English',
+        productsAndServices: [{ name: 'Widget' }],
+      };
+      const w1 = await fetch(`${BASE}/api/brands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}`, 'x-org-id': orgCId },
+        body: JSON.stringify(brandBody),
+      });
+      assert('viewer brand create in org C → 422 (can_write RLS refusal)', w1.status === 422, `status=${w1.status}`);
+
+      // (m) A promotes B to editor → 200; editor CAN write (role change is
+      // immediately effective — RLS re-evaluates on every query)
+      const p6 = await fetch(`${BASE}/api/orgs/${orgCId}/members/${memberUserId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ role: 'editor' }),
+      });
+      assert('PATCH member role viewer→editor → 200', p6.status === 200, `status=${p6.status}`);
+      const w2 = await fetch(`${BASE}/api/brands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}`, 'x-org-id': orgCId },
+        body: JSON.stringify(brandBody),
+      });
+      assert('editor brand create in org C → 201', w2.status === 201, `status=${w2.status}`);
+
+      // (n) LAST_OWNER guard: A cannot remove themselves as the only owner
+      const d1 = await fetch(`${BASE}/api/orgs/${orgCId}/members/${userId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${jwt}` },
+      });
+      const db1 = await jsonSafe(d1);
+      assert('removing the last owner → 409 LAST_OWNER', d1.status === 409 && db1.error === 'LAST_OWNER', `status=${d1.status}, error=${db1.error}`);
+
+      // (o) A removes B → 200; org C disappears from B's list
+      const d2 = await fetch(`${BASE}/api/orgs/${orgCId}/members/${memberUserId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${jwt}` },
+      });
+      assert('remove member B → 200', d2.status === 200, `status=${d2.status}`);
+      const o2 = await fetch(`${BASE}/api/orgs`, { headers: { Authorization: `Bearer ${memberJwt}` } });
+      const ob2 = await jsonSafe(o2);
+      assert("org C gone from B's list after removal", !(ob2.orgs ?? []).some(o => o.id === orgCId), `orgs=${JSON.stringify(ob2.orgs?.length)}`);
+
+      // (p) cleanup org C (service-role delete cascades members + brand)
+      const { error: delCErr } = await adminClient.from('organizations').delete().eq('id', orgCId);
+      assert('org C cleanup delete succeeded', !delCErr, `error=${delCErr?.message ?? ''}`);
+    }
+  }
+
   console.log('\n─── Test 15: /api/auth/logout with JWT + refreshToken revokes the session ───');
   {
     const res = await fetch(`${BASE}/api/auth/logout`, {

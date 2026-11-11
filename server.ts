@@ -24,8 +24,10 @@ import {
   resolveAuthedUser,
   getAuthedUser,
   getUserScopedClient,
+  getAdminClient,
   resolveUserOrgContext,
 } from './src/utils/supabaseServer';
+import { ASSIGNABLE_MEMBER_ROLES, type OrgRole } from './src/utils/orgRoles';
 
 dotenv.config();
 
@@ -396,6 +398,316 @@ app.get('/api/orgs', orgsRateLimiter, requireSupabaseAuth, async (req: Request, 
   } catch (err) {
     console.error('[orgs] failed:', err);
     return res.status(500).json({ error: 'ORGS_FAILED', message: 'Workspace list failed server-side.' });
+  }
+});
+
+// ============================================================================
+// Workspace members (Phase 3.4 — roster management)
+// Org targeted by PATH param (unlike CRUD's x-org-id header):
+//   GET    /api/orgs/:orgId/members            any member sees the roster
+//   POST   /api/orgs/:orgId/members            admin/owner adds { email, role }
+//   PATCH  /api/orgs/:orgId/members/:userId    admin/owner changes { role }
+//   DELETE /api/orgs/:orgId/members/:userId    admin/owner removes a member
+// The user-scoped client keeps RLS (members_* policies = can_admin) as the
+// REAL gate — the server only maps outcomes to honest status codes. The one
+// service-role touch: resolving an email to a user id (auth users are
+// invisible to ordinary JWTs by design) and admin-only email enrichment.
+// ============================================================================
+const MEMBER_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+async function prepareMemberAdmin(
+  req: Request,
+  res: Response,
+  orgId: string
+): Promise<{ scoped: import('@supabase/supabase-js').SupabaseClient; callerRole: string } | null> {
+  if (!UUID_PARAM_RE.test(orgId)) {
+    res.status(400).json({ error: 'INVALID_ORG_ID', message: 'The workspace id in the URL must be a UUID.' });
+    return null;
+  }
+  const user = getAuthedUser(req);
+  const scoped = await getUserScopedClient(user.token);
+  if (!scoped) {
+    res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+    return null;
+  }
+  // RLS members_select exposes the caller's own row; zero rows = not a
+  // member (403, existence of the org never leaked).
+  const selfRes = await scoped
+    .from('organization_members')
+    .select('role')
+    .eq('org_id', orgId)
+    .eq('user_id', user.id)
+    .maybeSingle();
+  if (selfRes.error) {
+    console.error('[members] caller role lookup failed:', selfRes.error.message);
+    res.status(500).json({ error: 'MEMBERS_FAILED', message: 'Member lookup failed server-side.' });
+    return null;
+  }
+  const role = (selfRes.data as { role?: string } | null)?.role;
+  if (role !== 'admin' && role !== 'owner') {
+    res.status(403).json({ error: 'MEMBER_MANAGEMENT_FORBIDDEN', message: 'Only admins and owners manage workspace members.' });
+    return null;
+  }
+  return { scoped, callerRole: role };
+}
+
+/** Refuse to demote/remove the LAST owner (RLS would allow it — the org
+ * would become unmanageable forever). Guard runs before the write. */
+async function lastOwnerGuard(
+  scoped: import('@supabase/supabase-js').SupabaseClient,
+  orgId: string,
+  targetUserId: string,
+  targetRole: string
+): Promise<{ ok: true } | { ok: false; status: number; body: Record<string, string> }> {
+  if (targetRole !== 'owner') return { ok: true };
+  const ownersRes = await scoped
+    .from('organization_members')
+    .select('user_id')
+    .eq('org_id', orgId)
+    .eq('role', 'owner');
+  if (ownersRes.error) {
+    return { ok: false, status: 500, body: { error: 'MEMBERS_FAILED', message: 'Owner lookup failed server-side.' } };
+  }
+  const owners = (ownersRes.data ?? []) as Array<{ user_id: string }>;
+  if (owners.length <= 1 && owners.some(o => o.user_id === targetUserId)) {
+    return {
+      ok: false,
+      status: 409,
+      body: { error: 'LAST_OWNER', message: 'Promote another admin to owner before stepping down.' },
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Resolve an auth user id from an email address. Primary path: a direct
+ * service-role read of auth.users (granted on hosted Supabase). Fallback:
+ * a bounded admin.listUsers scan — the fully documented API — in case the
+ * schema grant is ever unavailable. Emails are stored lowercased by GoTrue.
+ */
+async function findAuthUserIdByEmail(
+  email: string
+): Promise<{ id: string } | null | 'LOOKUP_FAILED'> {
+  const admin = await getAdminClient();
+  if (!admin) return 'LOOKUP_FAILED';
+  const lowered = email.toLowerCase();
+  try {
+    const direct = await admin
+      .schema('auth')
+      .from('users')
+      .select('id')
+      .eq('email', lowered)
+      .limit(1);
+    if (!direct.error) {
+      const row = (direct.data ?? []) as Array<{ id?: string }>;
+      return row[0]?.id ? { id: row[0].id } : null;
+    }
+    console.warn('[members] direct auth.users read failed, falling back to listUsers:', direct.error.message);
+  } catch (err) {
+    console.warn('[members] direct auth.users read threw, falling back to listUsers:', err);
+  }
+  for (let page = 1; page <= 5; page++) {
+    const listRes = await admin.auth.admin.listUsers({ page, perPage: 200 });
+    if (listRes.error) return 'LOOKUP_FAILED';
+    const hit = listRes.data.users?.find(u => (u.email ?? '').toLowerCase() === lowered);
+    if (hit) return { id: hit.id };
+    if ((listRes.data.users?.length ?? 0) < 200) break;
+  }
+  return null;
+}
+
+app.get('/api/orgs/:orgId/members', orgsRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId ?? '');
+    if (!UUID_PARAM_RE.test(orgId)) {
+      return res.status(400).json({ error: 'INVALID_ORG_ID', message: 'The workspace id in the URL must be a UUID.' });
+    }
+    const user = getAuthedUser(req);
+    const scoped = await getUserScopedClient(user.token);
+    if (!scoped) {
+      return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+    }
+    // RLS members_select: members see the roster; non-members see zero rows.
+    const rowsRes = await scoped
+      .from('organization_members')
+      .select('user_id, role, invited_at')
+      .eq('org_id', orgId)
+      .order('invited_at', { ascending: true });
+    if (rowsRes.error) {
+      console.error('[members] roster failed:', rowsRes.error.message);
+      return res.status(500).json({ error: 'MEMBERS_FAILED', message: 'Roster lookup failed server-side.' });
+    }
+    const rows = (rowsRes.data ?? []) as Array<{ user_id: string; role: string; invited_at: string | null }>;
+    if (rows.length === 0) {
+      return res.status(403).json({ error: 'FORBIDDEN_ORG', message: 'You are not a member of this workspace.' });
+    }
+    // Email enrichment is admin/owner-only: roster visibility is granted to
+    // every member, but email addresses are PII.
+    const selfRow = rows.find(r => r.user_id === user.id);
+    const canSeeEmails = selfRow?.role === 'admin' || selfRow?.role === 'owner';
+    const emailById = new Map<string, string | null>();
+    if (canSeeEmails) {
+      const admin = await getAdminClient();
+      if (admin) {
+        await Promise.all(
+          rows.map(async r => {
+            const g = await admin.auth.admin.getUserById(r.user_id);
+            emailById.set(r.user_id, g.data?.user?.email ?? null);
+          })
+        );
+      }
+    }
+    const members = rows.map(r => ({
+      userId: r.user_id,
+      email: emailById.get(r.user_id) ?? null,
+      role: r.role,
+      joinedAt: r.invited_at,
+    }));
+    return res.status(200).json({ members });
+  } catch (err) {
+    console.error('[members] roster failed:', err);
+    return res.status(500).json({ error: 'MEMBERS_FAILED', message: 'Roster lookup failed server-side.' });
+  }
+});
+
+app.post('/api/orgs/:orgId/members', orgsRateLimiter, requireSupabaseAuth, express.json({ limit: '16kb' }), async (req: Request, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId ?? '');
+    const body = (req.body ?? {}) as { email?: unknown; role?: unknown };
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    if (!MEMBER_EMAIL_RE.test(email)) {
+      return res.status(400).json({ error: 'INVALID_EMAIL', message: 'A valid email address is required.' });
+    }
+    if (typeof body.role !== 'string' || !ASSIGNABLE_MEMBER_ROLES.includes(body.role as OrgRole)) {
+      return res.status(400).json({ error: 'INVALID_ROLE', message: 'Role must be one of admin, editor, viewer (owner transfer is a dedicated flow).' });
+    }
+    const ctx = await prepareMemberAdmin(req, res, orgId);
+    if (!ctx) return;
+    const found = await findAuthUserIdByEmail(email);
+    if (found === 'LOOKUP_FAILED') {
+      return res.status(502).json({ error: 'USER_LOOKUP_FAILED', message: 'Could not resolve that email right now — try again.' });
+    }
+    if (!found) {
+      return res.status(404).json({ error: 'USER_NOT_FOUND', message: 'No account with that email yet — ask them to sign up first (email invites land in a later phase).' });
+    }
+    const existing = await ctx.scoped
+      .from('organization_members')
+      .select('user_id')
+      .eq('org_id', orgId)
+      .eq('user_id', found.id)
+      .maybeSingle();
+    if (existing.error) {
+      console.error('[members] duplicate check failed:', existing.error.message);
+      return res.status(500).json({ error: 'MEMBERS_FAILED', message: 'Member lookup failed server-side.' });
+    }
+    if (existing.data) {
+      return res.status(409).json({ error: 'ALREADY_MEMBER', message: 'That user is already a member of this workspace.' });
+    }
+    // RLS members_insert (WITH CHECK can_admin) is the real gate — this
+    // insert runs through the CALLER's scoped client.
+    const ins = await ctx.scoped
+      .from('organization_members')
+      .insert({ org_id: orgId, user_id: found.id, role: body.role });
+    if (ins.error) {
+      console.error('[members] insert refused:', ins.error.message);
+      if (ins.error.code === '23503') {
+        return res.status(404).json({ error: 'USER_NOT_FOUND', message: 'That account no longer exists.' });
+      }
+      return res.status(403).json({ error: 'MEMBER_MANAGEMENT_FORBIDDEN', message: 'The server refused this membership change.' });
+    }
+    return res.status(201).json({ member: { userId: found.id, email, role: body.role, joinedAt: null } });
+  } catch (err) {
+    console.error('[members] invite failed:', err);
+    return res.status(500).json({ error: 'MEMBERS_FAILED', message: 'Adding the member failed server-side.' });
+  }
+});
+
+app.patch('/api/orgs/:orgId/members/:userId', orgsRateLimiter, requireSupabaseAuth, express.json({ limit: '16kb' }), async (req: Request, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId ?? '');
+    const userId = String(req.params.userId ?? '');
+    if (!UUID_PARAM_RE.test(userId)) {
+      return res.status(400).json({ error: 'INVALID_USER_ID', message: 'The member id in the URL must be a UUID.' });
+    }
+    const body = (req.body ?? {}) as { role?: unknown };
+    if (typeof body.role !== 'string' || !ASSIGNABLE_MEMBER_ROLES.includes(body.role as OrgRole)) {
+      return res.status(400).json({ error: 'INVALID_ROLE', message: 'Role must be one of admin, editor, viewer (owner transfer is a dedicated flow).' });
+    }
+    const ctx = await prepareMemberAdmin(req, res, orgId);
+    if (!ctx) return;
+    const rosterRes = await ctx.scoped
+      .from('organization_members')
+      .select('user_id, role')
+      .eq('org_id', orgId);
+    if (rosterRes.error) {
+      console.error('[members] roster failed:', rosterRes.error.message);
+      return res.status(500).json({ error: 'MEMBERS_FAILED', message: 'Roster lookup failed server-side.' });
+    }
+    const roster = (rosterRes.data ?? []) as Array<{ user_id: string; role: string }>;
+    const target = roster.find(r => r.user_id === userId);
+    if (!target) {
+      return res.status(404).json({ error: 'MEMBER_NOT_FOUND', message: 'That user is not a member of this workspace.' });
+    }
+    const guard = await lastOwnerGuard(ctx.scoped, orgId, userId, target.role);
+    if (!guard.ok) {
+      return res.status(guard.status).json(guard.body);
+    }
+    const upd = await ctx.scoped
+      .from('organization_members')
+      .update({ role: body.role })
+      .eq('org_id', orgId)
+      .eq('user_id', userId);
+    if (upd.error) {
+      console.error('[members] update refused:', upd.error.message);
+      return res.status(403).json({ error: 'MEMBER_MANAGEMENT_FORBIDDEN', message: 'The server refused this membership change.' });
+    }
+    return res.status(200).json({ member: { userId, role: body.role } });
+  } catch (err) {
+    console.error('[members] role change failed:', err);
+    return res.status(500).json({ error: 'MEMBERS_FAILED', message: 'Changing the role failed server-side.' });
+  }
+});
+
+app.delete('/api/orgs/:orgId/members/:userId', orgsRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId ?? '');
+    const userId = String(req.params.userId ?? '');
+    if (!UUID_PARAM_RE.test(userId)) {
+      return res.status(400).json({ error: 'INVALID_USER_ID', message: 'The member id in the URL must be a UUID.' });
+    }
+    const ctx = await prepareMemberAdmin(req, res, orgId);
+    if (!ctx) return;
+    const rosterRes = await ctx.scoped
+      .from('organization_members')
+      .select('user_id, role')
+      .eq('org_id', orgId);
+    if (rosterRes.error) {
+      console.error('[members] roster failed:', rosterRes.error.message);
+      return res.status(500).json({ error: 'MEMBERS_FAILED', message: 'Roster lookup failed server-side.' });
+    }
+    const roster = (rosterRes.data ?? []) as Array<{ user_id: string; role: string }>;
+    const target = roster.find(r => r.user_id === userId);
+    if (!target) {
+      return res.status(404).json({ error: 'MEMBER_NOT_FOUND', message: 'That user is not a member of this workspace.' });
+    }
+    const guard = await lastOwnerGuard(ctx.scoped, orgId, userId, target.role);
+    if (!guard.ok) {
+      return res.status(guard.status).json(guard.body);
+    }
+    // RLS members_delete (USING can_admin) is the real gate.
+    const del = await ctx.scoped
+      .from('organization_members')
+      .delete()
+      .eq('org_id', orgId)
+      .eq('user_id', userId);
+    if (del.error) {
+      console.error('[members] delete refused:', del.error.message);
+      return res.status(403).json({ error: 'MEMBER_MANAGEMENT_FORBIDDEN', message: 'The server refused this membership change.' });
+    }
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('[members] removal failed:', err);
+    return res.status(500).json({ error: 'MEMBERS_FAILED', message: 'Removing the member failed server-side.' });
   }
 });
 
