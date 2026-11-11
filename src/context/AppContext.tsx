@@ -97,6 +97,18 @@ interface AppContextType {
   activeRole: OrgRole | null;
   /** P3.3: UI mirror of the DB can_write() policy for the active workspace. */
   canWrite: boolean;
+  /**
+   * P3.6: drop a workspace from the local orgs list after the server
+   * confirmed its deletion. Purely local-state repair — the server (RLS)
+   * remains the real gate; this only keeps the switcher honest.
+   */
+  forgetOrg: (orgId: string) => void;
+  /**
+   * P3.3/P3.6: best-effort refresh of per-workspace role + name metadata
+   * (after transfers and renames). Never throws — failures are silent
+   * because RLS stays the real gate regardless of what the UI shows.
+   */
+  refreshOrgMeta: () => Promise<void>;
   stats: {
     totalDrafts: number;
     readyDrafts: number;
@@ -225,30 +237,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }
 
   /**
-   * P3.3: best-effort fetch of GET /api/orgs to learn the caller's role in
-   * each workspace (the export endpoint carries no membership data). Roles
-   * are merged into the orgs list; a failure here is never fatal — the
+   * P3.3/P3.6: best-effort fetch of GET /api/orgs to refresh the caller's
+   * per-workspace metadata — role (export endpoint carries no membership
+   * data) and name (rename must reach the switcher without a full reload).
+   * Merged into the orgs list; a failure here is never fatal — the
    * server-side RLS remains the real write gate regardless.
    */
-  async function refreshOrgRoles(): Promise<void> {
+  async function refreshOrgMeta(): Promise<void> {
     try {
       const res = await authedFetch('/api/orgs');
       if (!res.ok) return;
       const body = await res.json();
       const rows: unknown = body?.orgs;
       if (!Array.isArray(rows)) return;
-      const roleByOrg = new Map<string, OrgRole>();
+      const metaByOrg = new Map<string, { role?: OrgRole; name?: string }>();
       for (const row of rows) {
-        const r = row as { id?: unknown; role?: unknown };
-        if (typeof r.id === 'string' && isOrgRole(r.role)) roleByOrg.set(r.id, r.role);
+        const r = row as { id?: unknown; role?: unknown; name?: unknown };
+        if (typeof r.id !== 'string') continue;
+        const meta: { role?: OrgRole; name?: string } = {};
+        if (isOrgRole(r.role)) meta.role = r.role;
+        if (typeof r.name === 'string' && r.name.length > 0) meta.name = r.name;
+        if (meta.role !== undefined || meta.name !== undefined) metaByOrg.set(r.id, meta);
       }
-      if (roleByOrg.size === 0) return;
+      if (metaByOrg.size === 0) return;
       setOrgs(prev =>
-        prev.map(o => (roleByOrg.has(o.id) ? { ...o, role: roleByOrg.get(o.id) } : o)),
+        prev.map(o => {
+          const meta = metaByOrg.get(o.id);
+          if (!meta) return o;
+          const next = { ...o };
+          if (meta.role !== undefined) next.role = meta.role;
+          if (meta.name !== undefined) next.name = meta.name;
+          return next;
+        }),
       );
     } catch {
-      // Role merge is advisory UI state only — ignore failures quietly.
+      // Metadata merge is advisory UI state only — ignore failures quietly.
     }
+  }
+
+  /** P3.6: remove a server-confirmed-deleted workspace from local state. */
+  function forgetOrg(orgId: string): void {
+    setOrgs(prev => prev.filter(o => o.id !== orgId));
   }
 
   /** Fetch the cloud workspace and replace local state with it (UUID adoption). */
@@ -272,7 +301,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setOrgs(listOrgsFromExport(data));
     setActiveOrgIdState(hydrated.organizationId);
     setActiveOrgId(hydrated.organizationId);
-    void refreshOrgRoles(); // P3.3: merge roles for the read-only UI (best effort)
+    void refreshOrgMeta(); // P3.3/P3.6: merge role + name for the UI (best effort)
   }
 
   /**
@@ -313,7 +342,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setHydrationStatus('ready');
       setLastSyncAt(new Date().toISOString());
       setLastSyncSummary(`Switched to workspace “${hydrated.organizationName ?? orgId}”.`);
-      void refreshOrgRoles(); // P3.3: roles for the freshly-targeted workspace
+      void refreshOrgMeta(); // P3.3/P3.6: role + name for the freshly-targeted workspace
     } catch (err) {
       // Restore the previous selection so the network layer keeps targeting
       // the workspace the UI still shows.
@@ -379,7 +408,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setActiveOrgId(hydrated.organizationId);
         retireLocalStorage();
         setHydrationStatus('ready');
-        void refreshOrgRoles(); // P3.3: merge roles once the workspace is live
+        void refreshOrgMeta(); // P3.3/P3.6: merge role + name once the workspace is live
       } catch (err) {
         if (cancelled) return;
         console.warn('[AppContext] hydration failed:', err);
@@ -850,6 +879,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activeOrgId: activeOrgIdState,
         activeRole,
         canWrite,
+        forgetOrg,
+        refreshOrgMeta,
         switchOrg,
         stats,
       }}

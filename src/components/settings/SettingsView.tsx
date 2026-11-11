@@ -29,6 +29,10 @@ import {
   User,
   Users,
   Plus,
+  Pencil,
+  Trash2,
+  Crown,
+  X,
   Cloud,
   CloudOff,
   CloudCog,
@@ -54,6 +58,8 @@ export const SettingsView: React.FC = () => {
     activeOrgId,
     activeRole,
     switchOrg,
+    forgetOrg,
+    refreshOrgMeta,
   } = useApp();
   const { user, signOut } = useAuth();
 
@@ -74,6 +80,116 @@ export const SettingsView: React.FC = () => {
     switchOrg(orgId)
       .catch((e: Error) => setSwitchOrgError(e.message || 'Workspace switch failed.'))
       .finally(() => setSwitchingOrgId(null));
+  };
+
+  // ── P3.5/P3.6: workspace lifecycle (owner powers) ──────────────────────
+  const [renamingOrgId, setRenamingOrgId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [confirmDeleteOrgId, setConfirmDeleteOrgId] = useState<string | null>(null);
+  const [orgBusyId, setOrgBusyId] = useState<string | null>(null);
+  const [orgActionMsg, setOrgActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // Owner powers are per-row (a row shows them only when THAT org's role is
+  // owner); this just decides whether the explanatory hint renders at all.
+  const isOwnerSomewhere = orgs.some(o => o.role === 'owner');
+
+  const startRenameOrg = (orgId: string, currentName: string) => {
+    setConfirmDeleteOrgId(null);
+    setOrgActionMsg(null);
+    setRenamingOrgId(orgId);
+    setRenameValue(currentName);
+  };
+
+  const handleRenameOrg = async (orgId: string) => {
+    if (orgBusyId) return;
+    const name = renameValue.trim();
+    if (name.length < 1 || name.length > 120) {
+      setOrgActionMsg({ ok: false, text: 'Workspace name must be 1-120 characters.' });
+      return;
+    }
+    setOrgBusyId(orgId);
+    setOrgActionMsg(null);
+    try {
+      const res = await authedFetch(`/api/orgs/${orgId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setOrgActionMsg({ ok: false, text: body?.message || `Rename failed (status ${res.status}).` });
+        return;
+      }
+      setOrgActionMsg({ ok: true, text: 'Workspace renamed.' });
+      setRenamingOrgId(null);
+      void refreshOrgMeta(); // P3.6: pull the new name into the switcher
+    } catch {
+      setOrgActionMsg({ ok: false, text: 'Network error while renaming the workspace.' });
+    } finally {
+      setOrgBusyId(null);
+    }
+  };
+
+  const handleDeleteOrg = async (orgId: string) => {
+    if (orgBusyId) return;
+    setOrgBusyId(orgId);
+    setOrgActionMsg(null);
+    try {
+      const res = await authedFetch(`/api/orgs/${orgId}`, { method: 'DELETE' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setOrgActionMsg({ ok: false, text: body?.message || `Delete failed (status ${res.status}).` });
+        setConfirmDeleteOrgId(null);
+        return;
+      }
+      const wasActive = orgId === activeOrgId;
+      const remaining = orgs.filter(o => o.id !== orgId);
+      setConfirmDeleteOrgId(null);
+      setOrgActionMsg({ ok: true, text: 'Workspace deleted.' });
+      forgetOrg(orgId); // switcher stops listing it immediately
+      if (wasActive && remaining.length > 0) {
+        // The active workspace is gone — move to the first remaining one.
+        // switchOrg re-hydrates everything from the server.
+        try {
+          await switchOrg(remaining[0].id);
+        } catch (e: unknown) {
+          setOrgActionMsg({ ok: false, text: (e as Error)?.message || 'Workspace deleted, but switching to the next workspace failed — reload the page.' });
+        }
+      }
+    } catch {
+      setOrgActionMsg({ ok: false, text: 'Network error while deleting the workspace.' });
+    } finally {
+      setOrgBusyId(null);
+    }
+  };
+
+  const handleTransferOwnership = async (m: OrgMember) => {
+    if (!activeOrgId || memberBusyId || orgBusyId) return;
+    setMemberBusyId(m.userId);
+    setMembersMsg(null);
+    try {
+      const res = await authedFetch(`/api/orgs/${activeOrgId}/ownership-transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId: m.userId }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMembersMsg({ ok: false, text: body?.message || `Ownership transfer failed (status ${res.status}).` });
+        return;
+      }
+      setMembersMsg({
+        ok: true,
+        text: typeof body?.warning === 'string'
+          ? body.warning
+          : `${m.email ?? 'That member'} now owns this workspace — you are an admin.`,
+      });
+      await loadMembers(); // snap the roster to the server truth
+      void refreshOrgMeta(); // role badges: caller OWNER→ADMIN, target ADMIN→OWNER
+    } catch {
+      setMembersMsg({ ok: false, text: 'Network error while transferring ownership.' });
+    } finally {
+      setMemberBusyId(null);
+    }
   };
 
   // ── P3.4: member management (admins/owners only) ──────────────────────
@@ -700,48 +816,136 @@ export const SettingsView: React.FC = () => {
               {orgs.map(o => {
                 const isActive = o.id === activeOrgId;
                 const isBusy = switchingOrgId === o.id;
+                const lifecycleBusy = orgBusyId === o.id || !!orgBusyId;
+                const isOwner = o.role === 'owner';
                 return (
-                  <button
+                  <div
                     key={o.id}
-                    type="button"
-                    disabled={isActive || !!switchingOrgId}
-                    onClick={() => handleSwitchOrg(o.id)}
-                    className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
+                    className={`w-full flex items-center gap-2 p-3 rounded-lg border transition-colors ${
                       isActive
                         ? 'bg-emerald-500/10 border-emerald-500/30'
-                        : 'bg-zinc-950 border-zinc-800/80 hover:bg-zinc-900 disabled:opacity-50'
+                        : 'bg-zinc-950 border-zinc-800/80'
                     }`}
                   >
-                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                      isActive ? 'bg-emerald-500/15 border border-emerald-500/30' : 'bg-zinc-900 border border-zinc-800'
-                    }`}>
-                      {isBusy ? (
-                        <Loader2 className="w-4 h-4 text-zinc-300 animate-spin" />
-                      ) : isActive ? (
-                        <Check className="w-4 h-4 text-emerald-400" />
-                      ) : (
-                        <Share2 className="w-4 h-4 text-zinc-500" />
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm text-zinc-100 font-medium truncate">{o.name}</div>
-                      <div className="text-xs text-zinc-500 truncate">{o.defaultTimezone ?? 'UTC'}</div>
-                    </div>
-                    {o.role && (
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold shrink-0 ${
-                        o.role === 'viewer'
-                          ? 'bg-amber-500/15 text-amber-400'
-                          : 'bg-zinc-800/90 text-zinc-300'
+                    <button
+                      type="button"
+                      disabled={isActive || !!switchingOrgId || lifecycleBusy}
+                      onClick={() => handleSwitchOrg(o.id)}
+                      title={isActive ? undefined : `Switch to ${o.name}`}
+                      className="flex-1 min-w-0 flex items-center gap-3 text-left transition-colors disabled:cursor-default"
+                    >
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                        isActive ? 'bg-emerald-500/15 border border-emerald-500/30' : 'bg-zinc-900 border border-zinc-800'
                       }`}>
-                        {roleBadgeLabel(o.role)}
-                      </span>
+                        {isBusy ? (
+                          <Loader2 className="w-4 h-4 text-zinc-300 animate-spin" />
+                        ) : isActive ? (
+                          <Check className="w-4 h-4 text-emerald-400" />
+                        ) : (
+                          <Share2 className="w-4 h-4 text-zinc-500" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        {renamingOrgId === o.id ? (
+                          <input
+                            autoFocus
+                            value={renameValue}
+                            onChange={e => setRenameValue(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') void handleRenameOrg(o.id);
+                              if (e.key === 'Escape') setRenamingOrgId(null);
+                            }}
+                            maxLength={120}
+                            className="w-full bg-zinc-950 border border-zinc-700 rounded-md px-2 py-1 text-sm text-zinc-100 focus:outline-hidden focus:border-emerald-500"
+                          />
+                        ) : (
+                          <div className="text-sm text-zinc-100 font-medium truncate">{o.name}</div>
+                        )}
+                        <div className="text-xs text-zinc-500 truncate">{o.defaultTimezone ?? 'UTC'}</div>
+                      </div>
+                      {o.role && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold shrink-0 ${
+                          o.role === 'viewer'
+                            ? 'bg-amber-500/15 text-amber-400'
+                            : 'bg-zinc-800/90 text-zinc-300'
+                        }`}>
+                          {roleBadgeLabel(o.role)}
+                        </span>
+                      )}
+                      {isActive && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold shrink-0">
+                          ACTIVE
+                        </span>
+                      )}
+                    </button>
+                    {isOwner && renamingOrgId !== o.id && (
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          disabled={lifecycleBusy || !!switchingOrgId}
+                          onClick={() => startRenameOrg(o.id, o.name)}
+                          title="Rename workspace"
+                          className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        {confirmDeleteOrgId === o.id ? (
+                          <span className="flex items-center gap-1">
+                            <span className="text-[10px] text-red-300 font-medium hidden sm:inline">Delete forever?</span>
+                            <button
+                              type="button"
+                              disabled={lifecycleBusy}
+                              onClick={() => void handleDeleteOrg(o.id)}
+                              title="Confirm delete — removes all brands, drafts and events"
+                              className="text-[10px] px-2 py-1 rounded-md bg-red-600 hover:bg-red-500 text-white font-semibold transition-colors disabled:opacity-50"
+                            >
+                              {orgBusyId === o.id ? '…' : 'Yes'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteOrgId(null)}
+                              title="Cancel"
+                              className="p-1 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={lifecycleBusy || !!switchingOrgId || orgs.length <= 1}
+                            onClick={() => { setOrgActionMsg(null); setConfirmDeleteOrgId(o.id); }}
+                            title={orgs.length <= 1 ? 'Your only workspace cannot be deleted' : 'Delete workspace'}
+                            className="p-1.5 rounded-md text-zinc-400 hover:text-red-400 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     )}
-                    {isActive && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold shrink-0">
-                        ACTIVE
-                      </span>
+                    {isOwner && renamingOrgId === o.id && (
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          disabled={lifecycleBusy || renameValue.trim().length < 1}
+                          onClick={() => void handleRenameOrg(o.id)}
+                          title="Save name"
+                          className="p-1.5 rounded-md text-emerald-400 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {orgBusyId === o.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={lifecycleBusy}
+                          onClick={() => setRenamingOrgId(null)}
+                          title="Cancel"
+                          className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-50"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     )}
-                  </button>
+                  </div>
                 );
               })}
               {orgs.length === 0 && hydrationStatus === 'loading' && (
@@ -769,6 +973,24 @@ export const SettingsView: React.FC = () => {
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                 <div className="flex-1">{switchOrgError}</div>
               </div>
+            )}
+
+            {orgActionMsg && (
+              <div className={`text-xs flex items-start gap-2 p-3 rounded-lg border ${
+                orgActionMsg.ok
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                  : 'bg-red-500/10 border-red-500/30 text-red-300'
+              }`}>
+                {orgActionMsg.ok ? <Check className="w-4 h-4 shrink-0 mt-0.5" /> : <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />}
+                <div className="flex-1">{orgActionMsg.text}</div>
+              </div>
+            )}
+
+            {isOwnerSomewhere && (
+              <p className="text-[11px] text-zinc-600">
+                Pencil renames a workspace you own; the trash icon deletes it (all brands, drafts and events
+                go with it — the server refuses while other members remain).
+              </p>
             )}
           </div>
 
@@ -829,6 +1051,18 @@ export const SettingsView: React.FC = () => {
                       >
                         {memberBusyId === m.userId ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Remove'}
                       </button>
+                      {activeRole === 'owner' && m.role === 'admin' && (
+                        <button
+                          type="button"
+                          disabled={!!memberBusyId || !!orgBusyId}
+                          onClick={() => void handleTransferOwnership(m)}
+                          title="Make this admin the workspace owner — you become an admin"
+                          className="text-xs px-2.5 py-1.5 rounded-md border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0 flex items-center gap-1"
+                        >
+                          <Crown className="w-3.5 h-3.5" />
+                          Make owner
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>

@@ -695,6 +695,150 @@ async function main() {
     }
   }
 
+  console.log('\n─── Test 14d: P3.5/P3.6 lifecycle — rename, ownership transfer, delete guards (live) ───');
+  {
+    // (a) a fresh second REAL auth user (B2) via the service-role admin API
+    const b2Email = `omni-owner-${Date.now()}@omnichannelplus.dev`;
+    const adminClientD = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY,
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+    const { data: createdD, error: createDErr } = await adminClientD.auth.admin.createUser({
+      email: b2Email,
+      password: TEST_PASSWORD,
+      email_confirm: true,
+    });
+    assert('admin.createUser for B2 succeeded', !createDErr && !!createdD?.user?.id, `error=${createDErr?.message ?? ''}`);
+    const b2UserId = createdD?.user?.id ?? null;
+    if (b2UserId) createdTestUserIds.push(b2UserId);
+
+    // (b) B2 logs in through the app
+    let b2Jwt = null;
+    {
+      const res = await fetch(`${BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: b2Email, password: TEST_PASSWORD }),
+      });
+      const body = await jsonSafe(res);
+      assert('B2 app login → 200', res.status === 200, `status=${res.status}`);
+      b2Jwt = body.session?.accessToken ?? null;
+    }
+
+    // (c) fresh org D owned by A (the primary smoke user)
+    const scopedD = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+      global: { headers: { Authorization: `Bearer ${jwt}` } },
+    });
+    const { data: orgDId, error: orgDErr } = await scopedD.rpc('create_organization', {
+      p_name: `Smoke Org D ${Date.now()}`,
+      p_slug: `smoke-org-d-${Date.now()}`,
+      p_timezone: 'Asia/Karachi',
+    });
+    assert('create_organization RPC (org D) succeeded', !orgDErr && typeof orgDId === 'string', `error=${orgDErr?.message ?? ''}`);
+
+    if (b2Jwt && b2UserId && typeof orgDId === 'string' && orgDId) {
+      const orgH = { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` };
+      const b2H = { 'Content-Type': 'application/json', Authorization: `Bearer ${b2Jwt}` };
+      const dumpD = async label => {
+        const { data } = await adminClientD.from('organization_members').select('user_id, role').eq('org_id', orgDId).order('invited_at');
+        console.log(`  [dump] ${label}:`, JSON.stringify(data?.map(r => ({ id: r.user_id.slice(0, 8), role: r.role }))), `A=${userId.slice(0, 8)} B2=${b2UserId.slice(0, 8)}`);
+      };
+
+      // (d) A invites B2 as ADMIN (transfer targets must be admins)
+      const inv = await fetch(`${BASE}/api/orgs/${orgDId}/members`, {
+        method: 'POST', headers: orgH,
+        body: JSON.stringify({ email: b2Email, role: 'admin' }),
+      });
+      const invBody = await jsonSafe(inv);
+      assert('invite B2 as admin → 201', inv.status === 201, `status=${inv.status}`);
+      assert('invite resolved B2 as the member', invBody.member?.userId === b2UserId, `resolved=${invBody.member?.userId}, expected=${b2UserId}`);
+      await dumpD('after invite');
+
+      // (e) admin CANNOT rename (server owner-only gate, before any RLS)
+      const ren1 = await fetch(`${BASE}/api/orgs/${orgDId}`, {
+        method: 'PATCH', headers: b2H, body: JSON.stringify({ name: 'B2 Renamed' }),
+      });
+      const rb1 = await jsonSafe(ren1);
+      assert('admin rename attempt → 403 ORG_MANAGEMENT_FORBIDDEN', ren1.status === 403 && rb1.error === 'ORG_MANAGEMENT_FORBIDDEN', `status=${ren1.status}, error=${rb1.error}`);
+
+      // (f) rename validation: empty name → 400 INVALID_NAME
+      const ren2 = await fetch(`${BASE}/api/orgs/${orgDId}`, {
+        method: 'PATCH', headers: orgH, body: JSON.stringify({ name: '   ' }),
+      });
+      const rb2 = await jsonSafe(ren2);
+      assert('empty rename → 400 INVALID_NAME', ren2.status === 400 && rb2.error === 'INVALID_NAME', `status=${ren2.status}, error=${rb2.error}`);
+
+      // (g) owner renames → 200, row echoes back
+      const ren3 = await fetch(`${BASE}/api/orgs/${orgDId}`, {
+        method: 'PATCH', headers: orgH, body: JSON.stringify({ name: `Smoke Org D Renamed ${Date.now()}` }),
+      });
+      const rb3 = await jsonSafe(ren3);
+      assert('owner rename → 200 with org row', ren3.status === 200 && typeof rb3.org?.name === 'string' && rb3.org.name.startsWith('Smoke Org D Renamed'), `status=${ren3.status}, name=${rb3.org?.name}`);
+      assert('rename response carries slug (immutable)', typeof rb3.org?.slug === 'string' && rb3.org.slug.startsWith('smoke-org-d-'), `slug=${rb3.org?.slug}`);
+
+      // (h) list reflects the rename
+      const lst = await fetch(`${BASE}/api/orgs`, { headers: { Authorization: `Bearer ${jwt}` } });
+      const lb = await jsonSafe(lst);
+      assert('renamed name visible in /api/orgs', (lb.orgs ?? []).some(o => o.id === orgDId && o.name.startsWith('Smoke Org D Renamed')), `names=${JSON.stringify((lb.orgs ?? []).map(o => o.name))}`);
+
+      // (i) transfer guards: self → 400, unknown member → 404
+      const tr1 = await fetch(`${BASE}/api/orgs/${orgDId}/ownership-transfer`, {
+        method: 'POST', headers: orgH, body: JSON.stringify({ targetUserId: userId }),
+      });
+      const tb1 = await jsonSafe(tr1);
+      assert('transfer to self → 400 INVALID_TARGET', tr1.status === 400 && tb1.error === 'INVALID_TARGET', `status=${tr1.status}, error=${tb1.error}`);
+
+      const tr2 = await fetch(`${BASE}/api/orgs/${orgDId}/ownership-transfer`, {
+        method: 'POST', headers: orgH, body: JSON.stringify({ targetUserId: '00000000-0000-4000-8000-000000000009' }),
+      });
+      const tb2 = await jsonSafe(tr2);
+      assert('transfer to unknown member → 404 MEMBER_NOT_FOUND', tr2.status === 404 && tb2.error === 'MEMBER_NOT_FOUND', `status=${tr2.status}, error=${tb2.error}`);
+
+      // (j) A transfers ownership to B2 (admin) → 200
+      const tr3 = await fetch(`${BASE}/api/orgs/${orgDId}/ownership-transfer`, {
+        method: 'POST', headers: orgH, body: JSON.stringify({ targetUserId: b2UserId }),
+      });
+      const tb3 = await jsonSafe(tr3);
+      assert('ownership transfer A → B2 → 200', tr3.status === 200 && !tb3.warning, `status=${tr3.status}, warning=${tb3.warning ?? ''}`);
+      await dumpD('after transfer');
+
+      // (k) roles swapped on both sides (end-to-end via /api/orgs)
+      const lstA = await fetch(`${BASE}/api/orgs`, { headers: { Authorization: `Bearer ${jwt}` } });
+      const lbA = await jsonSafe(lstA);
+      assert('A is now admin in org D', lbA.orgs?.find(o => o.id === orgDId)?.role === 'admin', `role=${lbA.orgs?.find(o => o.id === orgDId)?.role}`);
+      const lstB = await fetch(`${BASE}/api/orgs`, { headers: { Authorization: `Bearer ${b2Jwt}` } });
+      const lbB = await jsonSafe(lstB);
+      assert('B2 is now owner in org D', lbB.orgs?.find(o => o.id === orgDId)?.role === 'owner', `role=${lbB.orgs?.find(o => o.id === orgDId)?.role}`);
+
+      // (l) the OLD owner (now admin) cannot transfer again
+      const tr4 = await fetch(`${BASE}/api/orgs/${orgDId}/ownership-transfer`, {
+        method: 'POST', headers: orgH, body: JSON.stringify({ targetUserId: userId }),
+      });
+      const tb4 = await jsonSafe(tr4);
+      assert('ex-owner transfer attempt → 403', tr4.status === 403 && tb4.error === 'ORG_MANAGEMENT_FORBIDDEN', `status=${tr4.status}, error=${tb4.error}`);
+
+      // (m) new owner (B2) removes A → 200; org D leaves A's list
+      const rmA = await fetch(`${BASE}/api/orgs/${orgDId}/members/${userId}`, {
+        method: 'DELETE', headers: { Authorization: `Bearer ${b2Jwt}` },
+      });
+      assert('new owner removes A → 200', rmA.status === 200, `status=${rmA.status}`);
+      const lstA2 = await fetch(`${BASE}/api/orgs`, { headers: { Authorization: `Bearer ${jwt}` } });
+      const lbA2 = await jsonSafe(lstA2);
+      assert("org D gone from A's list after removal", !(lbA2.orgs ?? []).some(o => o.id === orgDId), `orgs=${JSON.stringify(lbA2.orgs?.length)}`);
+
+      // (n) LAST_WORKSPACE guard: org D is B2's only workspace → 409
+      const del1 = await fetch(`${BASE}/api/orgs/${orgDId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${b2Jwt}` } });
+      const db1 = await jsonSafe(del1);
+      assert('deleting the only workspace → 409 LAST_WORKSPACE', del1.status === 409 && db1.error === 'LAST_WORKSPACE', `status=${del1.status}, error=${db1.error}`);
+
+      // (o) cleanup org D (service-role delete cascades members)
+      const { error: delDErr } = await adminClientD.from('organizations').delete().eq('id', orgDId);
+      assert('org D cleanup delete succeeded', !delDErr, `error=${delDErr?.message ?? ''}`);
+    }
+  }
+
   console.log('\n─── Test 15: /api/auth/logout with JWT + refreshToken revokes the session ───');
   {
     const res = await fetch(`${BASE}/api/auth/logout`, {

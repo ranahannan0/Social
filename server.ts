@@ -361,10 +361,10 @@ app.get('/api/auth/me', authRateLimiter, async (req: Request, res: Response) => 
 // ============================================================================
 const orgsRateLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 30,
+  max: 60,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'RATE_LIMITED', message: 'Too many workspace list requests. Try again in a minute.' },
+  message: { error: 'RATE_LIMITED', message: 'Too many workspace requests. Try again in a minute.' },
 });
 
 app.get('/api/orgs', orgsRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
@@ -374,9 +374,15 @@ app.get('/api/orgs', orgsRateLimiter, requireSupabaseAuth, async (req: Request, 
     if (!scoped) {
       return res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
     }
+    // ONLY the caller's own membership rows feed the role mirror. RLS
+    // (members_select) also exposes the full roster, but merging every row
+    // would let OTHER members' roles overwrite this caller's role per org
+    // (last-row-wins on an unordered read — a real bug the P3.5 live
+    // two-user matrix caught: after a transfer the OLD owner's role
+    // clobbered the NEW owner's /api/orgs role mirror).
     const [orgsRes, membersRes] = await Promise.all([
       scoped.from('organizations').select('id, name, slug, default_timezone, created_at').order('created_at', { ascending: true }),
-      scoped.from('organization_members').select('org_id, role'),
+      scoped.from('organization_members').select('org_id, role').eq('user_id', user.id),
     ]);
     if (orgsRes.error) {
       console.error('[orgs] list failed:', orgsRes.error.message);
@@ -708,6 +714,210 @@ app.delete('/api/orgs/:orgId/members/:userId', orgsRateLimiter, requireSupabaseA
   } catch (err) {
     console.error('[members] removal failed:', err);
     return res.status(500).json({ error: 'MEMBERS_FAILED', message: 'Removing the member failed server-side.' });
+  }
+});
+
+// ============================================================================
+// Workspace lifecycle (Phase 3.5/3.6 — owner powers: rename, ownership
+// transfer, delete). Org targeted by PATH param, same as the member routes.
+// RLS stays the real gate wherever it can express the rule (orgs_update =
+// can_admin, orgs_delete = owner, members_update = can_admin); the tighter
+// owner-only checks here are the effective gate because the server is the
+// only database client. Same 403 for non-members and non-owners — the
+// existence of an org is never leaked. 501 in local mode (honest).
+// ============================================================================
+async function prepareOrgOwner(
+  req: Request,
+  res: Response,
+  orgId: string
+): Promise<{ scoped: import('@supabase/supabase-js').SupabaseClient; callerId: string; callerRole: string } | null> {
+  if (!UUID_PARAM_RE.test(orgId)) {
+    res.status(400).json({ error: 'INVALID_ORG_ID', message: 'The workspace id in the URL must be a UUID.' });
+    return null;
+  }
+  const user = getAuthedUser(req);
+  const scoped = await getUserScopedClient(user.token);
+  if (!scoped) {
+    res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+    return null;
+  }
+  // RLS members_select exposes the caller's own row; zero rows = not a
+  // member. Either way the answer is the same owner-only 403.
+  const selfRes = await scoped
+    .from('organization_members')
+    .select('role')
+    .eq('org_id', orgId)
+    .eq('user_id', user.id)
+    .maybeSingle();
+  if (selfRes.error) {
+    console.error('[orgs] caller role lookup failed:', selfRes.error.message);
+    res.status(500).json({ error: 'ORG_ACCESS_FAILED', message: 'Workspace access lookup failed server-side.' });
+    return null;
+  }
+  const role = (selfRes.data as { role?: string } | null)?.role;
+  if (role !== 'owner') {
+    res.status(403).json({ error: 'ORG_MANAGEMENT_FORBIDDEN', message: 'Only the workspace owner can do this.' });
+    return null;
+  }
+  return { scoped, callerId: user.id, callerRole: role };
+}
+
+// Rename a workspace (owner only). The slug is immutable — it exists for
+// URLs/housekeeping, not for humans to edit.
+app.patch('/api/orgs/:orgId', orgsRateLimiter, requireSupabaseAuth, express.json({ limit: '16kb' }), async (req: Request, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId ?? '');
+    const body = (req.body ?? {}) as { name?: unknown };
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (name.length < 1 || name.length > 120) {
+      return res.status(400).json({ error: 'INVALID_NAME', message: 'Workspace name must be 1-120 characters.' });
+    }
+    const ctx = await prepareOrgOwner(req, res, orgId);
+    if (!ctx) return;
+    // RLS orgs_update (USING can_admin) is the real gate behind this write.
+    const upd = await ctx.scoped
+      .from('organizations')
+      .update({ name })
+      .eq('id', orgId)
+      .select('id, name, slug, default_timezone')
+      .single();
+    if (upd.error) {
+      console.error('[orgs] rename refused:', upd.error.message);
+      return res.status(403).json({ error: 'ORG_MANAGEMENT_FORBIDDEN', message: 'The server refused this workspace change.' });
+    }
+    const row = upd.data as Record<string, unknown>;
+    return res.status(200).json({
+      org: {
+        id: row.id as string,
+        name: row.name as string,
+        slug: row.slug as string,
+        defaultTimezone: row.default_timezone as string,
+      },
+    });
+  } catch (err) {
+    console.error('[orgs] rename failed:', err);
+    return res.status(500).json({ error: 'ORG_UPDATE_FAILED', message: 'Renaming the workspace failed server-side.' });
+  }
+});
+
+// Transfer ownership (owner only). The target must ALREADY be an admin —
+// no surprise promotions. Implemented as two ordered writes through the
+// CALLER's RLS-scoped client (members_update = can_admin):
+//   1. promote the admin to owner   (crash here → two owners, SAFE —
+//      either one can finish the job from the members list)
+//   2. demote the caller to admin   (crash here → caller stays co-owner,
+//      also safe; reported honestly via `warning`)
+// The reverse order is forbidden by design: demoting the last owner first
+// would orphan the workspace if the promotion then failed.
+app.post('/api/orgs/:orgId/ownership-transfer', orgsRateLimiter, requireSupabaseAuth, express.json({ limit: '16kb' }), async (req: Request, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId ?? '');
+    const body = (req.body ?? {}) as { targetUserId?: unknown };
+    const targetUserId = typeof body.targetUserId === 'string' ? body.targetUserId.trim() : '';
+    if (!UUID_PARAM_RE.test(targetUserId)) {
+      return res.status(400).json({ error: 'INVALID_USER_ID', message: 'The target member id must be a UUID.' });
+    }
+    const ctx = await prepareOrgOwner(req, res, orgId);
+    if (!ctx) return;
+    if (targetUserId === ctx.callerId) {
+      return res.status(400).json({ error: 'INVALID_TARGET', message: 'You already own this workspace.' });
+    }
+    const targetRes = await ctx.scoped
+      .from('organization_members')
+      .select('role')
+      .eq('org_id', orgId)
+      .eq('user_id', targetUserId)
+      .maybeSingle();
+    if (targetRes.error) {
+      console.error('[orgs] transfer target lookup failed:', targetRes.error.message);
+      return res.status(500).json({ error: 'TRANSFER_FAILED', message: 'Ownership transfer failed server-side.' });
+    }
+    const targetRole = (targetRes.data as { role?: string } | null)?.role;
+    if (!targetRole) {
+      return res.status(404).json({ error: 'MEMBER_NOT_FOUND', message: 'That user is not a member of this workspace.' });
+    }
+    if (targetRole !== 'admin') {
+      return res.status(409).json({ error: 'TARGET_NOT_ADMIN', message: 'Only admins can be promoted to owner — change their role first.' });
+    }
+    const promote = await ctx.scoped
+      .from('organization_members')
+      .update({ role: 'owner' })
+      .eq('org_id', orgId)
+      .eq('user_id', targetUserId);
+    if (promote.error) {
+      console.error('[orgs] promote refused:', promote.error.message);
+      return res.status(403).json({ error: 'ORG_MANAGEMENT_FORBIDDEN', message: 'The server refused the ownership transfer.' });
+    }
+    const demote = await ctx.scoped
+      .from('organization_members')
+      .update({ role: 'admin' })
+      .eq('org_id', orgId)
+      .eq('user_id', ctx.callerId);
+    if (demote.error) {
+      // The transfer itself succeeded — the new owner must hear that.
+      console.error('[orgs] self-demote failed:', demote.error.message);
+      return res.status(200).json({
+        ok: true,
+        warning: 'Ownership moved, but your own role could not be changed to admin. You remain a co-owner — fix it from the members list.',
+      });
+    }
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('[orgs] transfer failed:', err);
+    return res.status(500).json({ error: 'TRANSFER_FAILED', message: 'Ownership transfer failed server-side.' });
+  }
+});
+
+// Delete a workspace (owner only). Two honest guards BEFORE the write:
+//   ORG_HAS_MEMBERS  — other members must be removed first, because a
+//                      deleted org would silently strand any of them whose
+//                      only workspace this was (there is no invite-by-email
+//                      path yet that could bring them back).
+//   LAST_WORKSPACE   — the caller cannot delete their only membership;
+//                      the app has no "create workspace" UI yet, so they
+//                      would be locked out of cloud mode entirely.
+// RLS orgs_delete (org_role_at = 'owner') is the real gate; FK cascades
+// remove members, brands, drafts, events, checks and settings.
+app.delete('/api/orgs/:orgId', orgsRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId ?? '');
+    const ctx = await prepareOrgOwner(req, res, orgId);
+    if (!ctx) return;
+    const rosterRes = await ctx.scoped
+      .from('organization_members')
+      .select('user_id')
+      .eq('org_id', orgId);
+    if (rosterRes.error) {
+      console.error('[orgs] delete roster lookup failed:', rosterRes.error.message);
+      return res.status(500).json({ error: 'ORG_DELETE_FAILED', message: 'Workspace deletion failed server-side.' });
+    }
+    if ((rosterRes.data ?? []).length > 1) {
+      return res.status(409).json({ error: 'ORG_HAS_MEMBERS', message: 'Remove all other members before deleting this workspace.' });
+    }
+    const mineRes = await ctx.scoped
+      .from('organization_members')
+      .select('org_id')
+      .eq('user_id', ctx.callerId);
+    if (mineRes.error) {
+      console.error('[orgs] delete membership lookup failed:', mineRes.error.message);
+      return res.status(500).json({ error: 'ORG_DELETE_FAILED', message: 'Workspace deletion failed server-side.' });
+    }
+    const myOrgs = ((mineRes.data ?? []) as Array<{ org_id: string }>).map(r => r.org_id);
+    if (!myOrgs.some(id => id !== orgId)) {
+      return res.status(409).json({ error: 'LAST_WORKSPACE', message: 'This is your only workspace — join or create another one before deleting it.' });
+    }
+    const del = await ctx.scoped
+      .from('organizations')
+      .delete()
+      .eq('id', orgId);
+    if (del.error) {
+      console.error('[orgs] delete refused:', del.error.message);
+      return res.status(403).json({ error: 'ORG_MANAGEMENT_FORBIDDEN', message: 'The server refused this workspace deletion.' });
+    }
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('[orgs] delete failed:', err);
+    return res.status(500).json({ error: 'ORG_DELETE_FAILED', message: 'Workspace deletion failed server-side.' });
   }
 });
 

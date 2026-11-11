@@ -585,6 +585,54 @@ async function runAllTests(): Promise<boolean> {
     };
   });
 
+  // 8i-quater. P3.5/P3.6 workspace lifecycle endpoints: the same honest 501
+  // in local mode — requireSupabaseAuth fires before any validation.
+  await assertTest('Org Rename Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Renamed' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — renaming requires Supabase mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Ownership Transfer Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000/ownership-transfer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserId: '00000000-0000-4000-8000-000000000009' }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — ownership transfer requires Supabase mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Org Delete Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000`, {
+      method: 'DELETE',
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — workspace deletion requires Supabase mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
   // 8j. Auth endpoints honest 501 in LOCAL storage mode
   // The browser-facing auth routes (/api/auth/signup, /login, /logout, /me)
   // must NOT fake a session when Supabase is not configured. They return 501
