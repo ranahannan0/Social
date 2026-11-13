@@ -4,6 +4,7 @@ import { ContentDraft, PlatformType, ContentStatus } from '../../types';
 import { PLATFORMS_CONFIG } from '../../services/constants';
 import { PlatformIcon } from '../common/PlatformIcon';
 import { ScheduleModal } from '../common/ScheduleModal';
+import { VideoAssetsCard } from './VideoAssetsCard';
 import {
   Library,
   Search,
@@ -118,6 +119,9 @@ ${draft.hashtags.map(t => `#${t}`).join(' ')}
 
   return (
     <div className="space-y-6">
+      {/* Video Assets (P6) — upload + AI analysis */}
+      <VideoAssetsCard />
+
       {/* Header and Filter Bar */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">

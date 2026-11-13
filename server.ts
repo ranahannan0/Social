@@ -16,6 +16,17 @@ import {
   CrudValidationError,
 } from './src/utils/crudMappers';
 import {
+  VIDEO_MAX_BYTES,
+  VIDEO_BODY_LIMIT,
+  VIDEO_WRITE_NOTE,
+  normalizeVideoMime,
+  sanitizeFileName,
+  mimeToExt,
+  buildFallbackVideoAnalysis,
+  type VideoAnalysis,
+  type VideoMimeType,
+} from './src/utils/videoAssets';
+import {
   getStorageMode,
   getStorageModeLabel,
   isSupabaseConfigured,
@@ -1019,6 +1030,384 @@ app.post(
     }
   }
 );
+
+// ============================================================================
+// Video assets (P6 vertical slice — upload → AI analysis → suggestions).
+// Org targeted by PATH param, same family as members/lifecycle routes. RLS is
+// the real gate: video_assets policies (select=can_read, insert/update=
+// can_write, delete=can_admin) and storage policies on the private
+// 'org-videos' bucket mirror org membership. The server checks below are the
+// honest mirrors; non-members and under-privileged members get the SAME 403
+// so org existence never leaks. 501 in local mode.
+//
+// NOTE: this block sits BEFORE the global 64kb parser on purpose — the upload
+// route carries raw video bytes (up to 25 MB) as its own body, exactly like
+// the import route above carries its own 2 MB JSON.
+// ============================================================================
+const videosRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'RATE_LIMITED', message: 'Too many video requests. Try again in a minute.' },
+});
+
+const VIDEO_WRITE_ROLES: string[] = ['owner', 'admin', 'editor'];
+
+// Shared gate: look up the caller's own membership row through RLS and require
+// one of `allowedRoles`. Same 403 for non-members and under-privileged members.
+async function prepareOrgVideoAccess(
+  req: Request,
+  res: Response,
+  orgId: string,
+  allowedRoles: string[],
+  errorCode: string,
+  errorMessage: string
+): Promise<{ scoped: import('@supabase/supabase-js').SupabaseClient; callerId: string; role: string } | null> {
+  if (!UUID_PARAM_RE.test(orgId)) {
+    res.status(400).json({ error: 'INVALID_ORG_ID', message: 'The workspace id in the URL must be a UUID.' });
+    return null;
+  }
+  const user = getAuthedUser(req);
+  const scoped = await getUserScopedClient(user.token);
+  if (!scoped) {
+    res.status(501).json({ error: 'SUPABASE_UNAVAILABLE', message: 'Supabase client could not be initialized.' });
+    return null;
+  }
+  const selfRes = await scoped
+    .from('organization_members')
+    .select('role')
+    .eq('org_id', orgId)
+    .eq('user_id', user.id)
+    .maybeSingle();
+  if (selfRes.error) {
+    console.error('[videos] caller role lookup failed:', selfRes.error.message);
+    res.status(500).json({ error: 'VIDEO_ACCESS_FAILED', message: 'Workspace access lookup failed server-side.' });
+    return null;
+  }
+  const role = (selfRes.data as { role?: string } | null)?.role;
+  if (!role || !allowedRoles.includes(role)) {
+    res.status(403).json({ error: errorCode, message: errorMessage });
+    return null;
+  }
+  return { scoped, callerId: user.id, role };
+}
+
+// Upload a video. Raw bytes are the body (video/mp4|webm|quicktime, ≤ 25 MB);
+// display metadata travels in headers. The storage path is server-generated
+// ('<orgId>/<uuid>.<ext>') — user input never touches object names.
+app.post(
+  '/api/orgs/:orgId/videos',
+  videosRateLimiter,
+  requireSupabaseAuth,
+  express.raw({ type: () => true, limit: VIDEO_BODY_LIMIT }),
+  async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.params.orgId ?? '');
+      const ctx = await prepareOrgVideoAccess(
+        req, res, orgId, VIDEO_WRITE_ROLES,
+        VIDEO_WRITE_NOTE.code, VIDEO_WRITE_NOTE.message,
+      );
+      if (!ctx) return;
+
+      const body = req.body as Buffer;
+      if (!Buffer.isBuffer(body) || body.length === 0) {
+        return res.status(400).json({ error: 'EMPTY_FILE', message: 'The video file body is missing or empty.' });
+      }
+      if (body.length > VIDEO_MAX_BYTES) {
+        return res.status(413).json({ error: 'FILE_TOO_LARGE', message: 'Videos are limited to 25 MB.' });
+      }
+      const mime = normalizeVideoMime(req.headers['content-type']);
+      if (!mime) {
+        return res.status(415).json({ error: 'UNSUPPORTED_TYPE', message: 'Only video/mp4, video/webm and video/quicktime are supported.' });
+      }
+      const rawNameHeader = req.headers['x-file-name'];
+      let decodedName: unknown = rawNameHeader;
+      if (typeof rawNameHeader === 'string') {
+        try { decodedName = decodeURIComponent(rawNameHeader); } catch { decodedName = rawNameHeader; }
+      }
+      const fileName = sanitizeFileName(decodedName);
+      if (!fileName) {
+        return res.status(400).json({ error: 'INVALID_FILE_NAME', message: 'A file name of 1-200 characters is required.' });
+      }
+
+      const objectPath = `${orgId}/${crypto.randomUUID()}.${mimeToExt(mime)}`;
+      const uploadRes = await ctx.scoped.storage.from('org-videos').upload(objectPath, body, { contentType: mime });
+      if (uploadRes.error) {
+        console.error('[videos] storage upload refused:', uploadRes.error.message);
+        return res.status(403).json({ error: VIDEO_WRITE_NOTE.code, message: 'The server refused this upload.' });
+      }
+
+      const ins = await ctx.scoped
+        .from('video_assets')
+        .insert({
+          org_id: orgId,
+          storage_path: objectPath,
+          file_name: fileName,
+          mime_type: mime,
+          size_bytes: body.length,
+          status: 'uploaded',
+          created_by: ctx.callerId,
+        })
+        .select('id, file_name, mime_type, size_bytes, status, created_at')
+        .single();
+      if (ins.error) {
+        // The object landed but the row did not — remove the object so
+        // storage never drifts from the database.
+        console.error('[videos] row insert failed, removing orphan object:', ins.error.message);
+        await ctx.scoped.storage.from('org-videos').remove([objectPath]);
+        return res.status(403).json({ error: VIDEO_WRITE_NOTE.code, message: 'The server refused this upload.' });
+      }
+      const row = ins.data as Record<string, unknown>;
+      return res.status(201).json({
+        video: {
+          id: row.id as string,
+          fileName: row.file_name as string,
+          mimeType: row.mime_type as string,
+          sizeBytes: Number(row.size_bytes),
+          status: row.status as string,
+          createdAt: row.created_at as string,
+        },
+      });
+    } catch (err) {
+      console.error('[videos] upload failed:', err);
+      return res.status(500).json({ error: 'VIDEO_UPLOAD_FAILED', message: 'Video upload failed server-side.' });
+    }
+  }
+);
+
+// List the workspace's video assets (every member can read).
+app.get('/api/orgs/:orgId/videos', videosRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId ?? '');
+    const ctx = await prepareOrgVideoAccess(
+      req, res, orgId, ['owner', 'admin', 'editor', 'viewer'],
+      'FORBIDDEN_ORG', 'You are not a member of that workspace.',
+    );
+    if (!ctx) return;
+    const list = await ctx.scoped
+      .from('video_assets')
+      .select('id, file_name, mime_type, size_bytes, status, analysis, analysis_is_fallback, analyzed_at, created_at')
+      .eq('org_id', orgId)
+      .order('created_at', { ascending: false });
+    if (list.error) {
+      console.error('[videos] list failed:', list.error.message);
+      return res.status(500).json({ error: 'VIDEO_LIST_FAILED', message: 'Listing videos failed server-side.' });
+    }
+    const videos = ((list.data ?? []) as Array<Record<string, unknown>>).map(row => ({
+      id: row.id as string,
+      fileName: row.file_name as string,
+      mimeType: row.mime_type as string,
+      sizeBytes: Number(row.size_bytes),
+      status: row.status as string,
+      analysis: row.analysis ?? null,
+      analysisIsFallback: row.analysis_is_fallback ?? null,
+      analyzedAt: row.analyzed_at ?? null,
+      createdAt: row.created_at as string,
+    }));
+    return res.json({ videos });
+  } catch (err) {
+    console.error('[videos] list failed:', err);
+    return res.status(500).json({ error: 'VIDEO_LIST_FAILED', message: 'Listing videos failed server-side.' });
+  }
+});
+
+// AI analysis of a stored video. Gemini watches the actual bytes when the key
+// is configured; otherwise (or if the upstream call fails) the honest
+// metadata-only fallback runs and is labelled analysisIsFallback=true — same
+// convention as Content Studio.
+const VIDEO_ANALYSIS_PROMPT = `You are the Video Strategy Engine of OMNI CHANNEL PLUS v2.0.
+Analyze the attached marketing video as a senior social-media strategist.
+Judge: the 3-second hook, pacing, visual quality, audio, on-screen text and captions, CTA presence, and fit for these platform ids: linkedin, x, instagram_reels, instagram_feed, youtube, tiktok, pinterest, whatsapp, email, blog_seo.
+Give concrete, specific, actionable advice — no generic filler. Write in clear English.`;
+
+const VIDEO_ANALYSIS_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    summary: { type: Type.STRING, description: '2-4 sentence overall assessment of the video' },
+    strengths: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'What already works' },
+    improvements: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Concrete fixes, most important first' },
+    suggestions: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING, description: 'Short suggestion headline' },
+          detail: { type: Type.STRING, description: 'What to change and why' },
+          priority: { type: Type.STRING, description: 'high, medium or low' },
+        },
+        required: ['title', 'detail', 'priority'],
+      },
+    },
+    bestPlatforms: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Platform ids from the supported list' },
+    suggestedCaption: { type: Type.STRING, description: 'Ready-to-post caption including the CTA' },
+    suggestedHashtags: { type: Type.ARRAY, items: { type: Type.STRING } },
+  },
+  required: ['summary', 'strengths', 'improvements', 'suggestions', 'bestPlatforms', 'suggestedCaption', 'suggestedHashtags'],
+};
+
+app.post('/api/orgs/:orgId/videos/:videoId/analyze', videosRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId ?? '');
+    const videoId = String(req.params.videoId ?? '');
+    if (!UUID_PARAM_RE.test(videoId)) {
+      return res.status(400).json({ error: 'INVALID_VIDEO_ID', message: 'The video id in the URL must be a UUID.' });
+    }
+    const ctx = await prepareOrgVideoAccess(
+      req, res, orgId, VIDEO_WRITE_ROLES,
+      VIDEO_WRITE_NOTE.code, VIDEO_WRITE_NOTE.message,
+    );
+    if (!ctx) return;
+
+    const rowRes = await ctx.scoped
+      .from('video_assets')
+      .select('id, storage_path, file_name, mime_type, size_bytes, status')
+      .eq('id', videoId)
+      .eq('org_id', orgId)
+      .maybeSingle();
+    if (rowRes.error) {
+      console.error('[videos] analyze row lookup failed:', rowRes.error.message);
+      return res.status(500).json({ error: 'VIDEO_ANALYSIS_FAILED', message: 'Video lookup failed server-side.' });
+    }
+    const row = rowRes.data as Record<string, unknown> | null;
+    if (!row) {
+      return res.status(404).json({ error: 'VIDEO_NOT_FOUND', message: 'That video does not exist in this workspace.' });
+    }
+    if (row.status === 'analyzing') {
+      return res.status(409).json({ error: 'ANALYSIS_IN_PROGRESS', message: 'An analysis run is already in progress for this video.' });
+    }
+
+    // Persist the in-progress marker first so the UI reflects reality even
+    // if the caller walks away mid-run (RLS can_write gates the update).
+    await ctx.scoped
+      .from('video_assets')
+      .update({ status: 'analyzing', analysis: null, analysis_is_fallback: null, analyzed_at: null })
+      .eq('id', videoId);
+
+    const meta = {
+      fileName: row.file_name as string,
+      mimeType: row.mime_type as VideoMimeType,
+      sizeBytes: Number(row.size_bytes),
+    };
+    let analysis: VideoAnalysis | null = null;
+    let isFallback = true;
+    let note = 'Deterministic heuristic analysis (GEMINI_API_KEY not configured). Configure the key to enable live AI analysis.';
+
+    if (isKeyConfigured && ai) {
+      try {
+        const dl = await ctx.scoped.storage.from('org-videos').download(row.storage_path as string);
+        if (dl.error || !dl.data) {
+          throw new Error(dl.error?.message || 'storage download returned no data');
+        }
+        const bytes = new Uint8Array(await dl.data.arrayBuffer());
+        const base64 = Buffer.from(bytes).toString('base64');
+        const geminiRes = await withTimeout(
+          ai.models.generateContent({
+            model: configuredModel,
+            contents: [{
+              role: 'user',
+              parts: [
+                { inlineData: { mimeType: meta.mimeType, data: base64 } },
+                { text: VIDEO_ANALYSIS_PROMPT },
+              ],
+            }],
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: VIDEO_ANALYSIS_SCHEMA,
+            },
+          }),
+          120000,
+          'Gemini video analysis timed out after 120000ms'
+        );
+        const parsed = JSON.parse((geminiRes.text ?? '').trim()) as VideoAnalysis;
+        if (!parsed || typeof parsed.summary !== 'string' || !Array.isArray(parsed.suggestions)) {
+          throw new Error('Gemini returned an unexpected analysis shape');
+        }
+        analysis = parsed;
+        isFallback = false;
+        note = `Analyzed live by ${configuredModel}.`;
+      } catch (aiErr) {
+        console.error('[videos] Gemini analysis failed, honest fallback used:', aiErr instanceof Error ? aiErr.message : aiErr);
+        note = 'Upstream AI analysis failed or timed out — heuristic analysis returned instead.';
+      }
+    }
+    if (!analysis) {
+      analysis = buildFallbackVideoAnalysis(meta);
+    }
+
+    const upd = await ctx.scoped
+      .from('video_assets')
+      .update({ status: 'analyzed', analysis, analysis_is_fallback: isFallback, analyzed_at: new Date().toISOString() })
+      .eq('id', videoId)
+      .select('id, status, analysis, analysis_is_fallback, analyzed_at')
+      .single();
+    if (upd.error) {
+      console.error('[videos] analysis persist failed:', upd.error.message);
+      return res.status(500).json({ error: 'VIDEO_ANALYSIS_FAILED', message: 'Saving the analysis failed server-side.' });
+    }
+    const updRow = upd.data as Record<string, unknown>;
+    return res.json({
+      video: {
+        id: updRow.id as string,
+        status: updRow.status as string,
+        analysis: updRow.analysis ?? null,
+        analysisIsFallback: updRow.analysis_is_fallback ?? null,
+        analyzedAt: updRow.analyzed_at ?? null,
+      },
+      note,
+    });
+  } catch (err) {
+    console.error('[videos] analyze failed:', err);
+    return res.status(500).json({ error: 'VIDEO_ANALYSIS_FAILED', message: 'Video analysis failed server-side.' });
+  }
+});
+
+// Delete a video (admins and above): removes the storage object AND the row.
+app.delete('/api/orgs/:orgId/videos/:videoId', videosRateLimiter, requireSupabaseAuth, async (req: Request, res: Response) => {
+  try {
+    const orgId = String(req.params.orgId ?? '');
+    const videoId = String(req.params.videoId ?? '');
+    if (!UUID_PARAM_RE.test(videoId)) {
+      return res.status(400).json({ error: 'INVALID_VIDEO_ID', message: 'The video id in the URL must be a UUID.' });
+    }
+    const ctx = await prepareOrgVideoAccess(
+      req, res, orgId, ['owner', 'admin'],
+      'VIDEO_DELETE_FORBIDDEN', 'Admins and owners can delete videos.',
+    );
+    if (!ctx) return;
+
+    const rowRes = await ctx.scoped
+      .from('video_assets')
+      .select('id, storage_path')
+      .eq('id', videoId)
+      .eq('org_id', orgId)
+      .maybeSingle();
+    if (rowRes.error) {
+      console.error('[videos] delete row lookup failed:', rowRes.error.message);
+      return res.status(500).json({ error: 'VIDEO_DELETE_FAILED', message: 'Video lookup failed server-side.' });
+    }
+    const row = rowRes.data as Record<string, unknown> | null;
+    if (!row) {
+      return res.status(404).json({ error: 'VIDEO_NOT_FOUND', message: 'That video does not exist in this workspace.' });
+    }
+
+    const rm = await ctx.scoped.storage.from('org-videos').remove([row.storage_path as string]);
+    if (rm.error) {
+      console.error('[videos] storage object removal failed:', rm.error.message);
+      return res.status(500).json({ error: 'VIDEO_DELETE_FAILED', message: 'Removing the video file failed server-side.' });
+    }
+
+    const del = await ctx.scoped.from('video_assets').delete().eq('id', videoId).eq('org_id', orgId);
+    if (del.error) {
+      console.error('[videos] row delete refused:', del.error.message);
+      return res.status(403).json({ error: 'VIDEO_DELETE_FORBIDDEN', message: 'The server refused this deletion.' });
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[videos] delete failed:', err);
+    return res.status(500).json({ error: 'VIDEO_DELETE_FAILED', message: 'Video deletion failed server-side.' });
+  }
+});
 
 // Security: Reduce JSON request body size limit to 64kb (appropriate for text-only inputs)
 app.use(express.json({ limit: '64kb' }));

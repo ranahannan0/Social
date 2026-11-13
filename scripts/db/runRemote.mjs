@@ -33,7 +33,7 @@ if (!DB_URL) {
 
 const TENANT = ['brands', 'calendar_events', 'compliance_checks', 'content_drafts',
   'generation_jobs', 'organization_members', 'organization_settings',
-  'organizations', 'profiles'];
+  'organizations', 'profiles', 'video_assets'];
 
 function migrationFiles() {
   return readdirSync(join(ROOT, MIGDIR))

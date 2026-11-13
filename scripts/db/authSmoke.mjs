@@ -839,6 +839,177 @@ async function main() {
     }
   }
 
+  console.log('\n─── Test 14e: P6 video assets — upload, role gates, AI analysis, delete (live) ───');
+  {
+    // (a) a fresh second REAL auth user (B3) via the service-role admin API
+    const b3Email = `omni-editor-${Date.now()}@omnichannelplus.dev`;
+    const adminClientE = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY,
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+    const { data: createdE, error: createEErr } = await adminClientE.auth.admin.createUser({
+      email: b3Email,
+      password: TEST_PASSWORD,
+      email_confirm: true,
+    });
+    assert('admin.createUser for B3 succeeded', !createEErr && !!createdE?.user?.id, `error=${createEErr?.message ?? ''}`);
+    const b3UserId = createdE?.user?.id ?? null;
+    if (b3UserId) createdTestUserIds.push(b3UserId);
+
+    // (b) B3 logs in through the app
+    let b3Jwt = null;
+    {
+      const res = await fetch(`${BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: b3Email, password: TEST_PASSWORD }),
+      });
+      const body = await jsonSafe(res);
+      assert('B3 app login → 200', res.status === 200, `status=${res.status}`);
+      b3Jwt = body.session?.accessToken ?? null;
+    }
+
+    // (c) fresh org E owned by A (the primary smoke user)
+    const scopedE = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+      global: { headers: { Authorization: `Bearer ${jwt}` } },
+    });
+    const { data: orgEId, error: orgEErr } = await scopedE.rpc('create_organization', {
+      p_name: `Smoke Org E ${Date.now()}`,
+      p_slug: `smoke-org-e-${Date.now()}`,
+      p_timezone: 'Asia/Karachi',
+    });
+    assert('create_organization RPC (org E) succeeded', !orgEErr && typeof orgEId === 'string', `error=${orgEErr?.message ?? ''}`);
+
+    if (b3Jwt && b3UserId && typeof orgEId === 'string' && orgEId) {
+      const aH = { Authorization: `Bearer ${jwt}` };
+      const b3H = { Authorization: `Bearer ${b3Jwt}` };
+
+      // A invites B3 as viewer first (write gate must refuse viewers)
+      const inv = await fetch(`${BASE}/api/orgs/${orgEId}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...aH },
+        body: JSON.stringify({ email: b3Email, role: 'viewer' }),
+      });
+      assert('invite B3 as viewer → 201', inv.status === 201, `status=${inv.status}`);
+
+      // (d) viewer upload → 403 VIDEO_WRITE_FORBIDDEN (non-member would get
+      // the SAME code — org existence never leaks)
+      const up1 = await fetch(`${BASE}/api/orgs/${orgEId}/videos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'video/mp4', 'x-file-name': encodeURIComponent('viewer-probe.mp4'), ...b3H },
+        body: Buffer.alloc(2048, 7),
+      });
+      const ub1 = await jsonSafe(up1);
+      assert('viewer upload → 403 VIDEO_WRITE_FORBIDDEN', up1.status === 403 && ub1.error === 'VIDEO_WRITE_FORBIDDEN', `status=${up1.status}, error=${ub1.error}`);
+
+      // (e) validation probes as owner: empty body → 400, bad mime → 415
+      const up2 = await fetch(`${BASE}/api/orgs/${orgEId}/videos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'video/mp4', 'x-file-name': encodeURIComponent('empty.mp4'), ...aH },
+        body: Buffer.alloc(0),
+      });
+      const ub2 = await jsonSafe(up2);
+      assert('empty upload body → 400 EMPTY_FILE', up2.status === 400 && ub2.error === 'EMPTY_FILE', `status=${up2.status}, error=${ub2.error}`);
+
+      const up3 = await fetch(`${BASE}/api/orgs/${orgEId}/videos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'video/x-msvideo', 'x-file-name': encodeURIComponent('legacy.avi'), ...aH },
+        body: Buffer.alloc(2048, 7),
+      });
+      const ub3 = await jsonSafe(up3);
+      assert('unsupported mime → 415 UNSUPPORTED_TYPE', up3.status === 415 && ub3.error === 'UNSUPPORTED_TYPE', `status=${up3.status}, error=${ub3.error}`);
+
+      // (f) promote B3 to editor → editor CAN upload
+      const patch = await fetch(`${BASE}/api/orgs/${orgEId}/members/${b3UserId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...aH },
+        body: JSON.stringify({ role: 'editor' }),
+      });
+      assert('PATCH B3 viewer→editor → 200', patch.status === 200, `status=${patch.status}`);
+
+      // A tiny plausible mp4: ftyp box header + deterministic filler.
+      const mp4 = Buffer.alloc(700 * 1024, 42);
+      Buffer.from([0x00, 0x00, 0x00, 0x18]).copy(mp4, 0);
+      Buffer.from('ftypmp42').copy(mp4, 4);
+
+      const up4 = await fetch(`${BASE}/api/orgs/${orgEId}/videos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'video/mp4', 'x-file-name': encodeURIComponent('Brand Teaser v2.mp4'), ...b3H },
+        body: mp4,
+      });
+      const ub4 = await jsonSafe(up4);
+      assert('editor upload → 201', up4.status === 201, `status=${up4.status}`);
+      const videoId = ub4.video?.id ?? null;
+      assert('upload response carries id + status uploaded', typeof videoId === 'string' && ub4.video?.status === 'uploaded', `video=${JSON.stringify(ub4.video ?? {})}`);
+      assert('upload echoes sanitized file name', ub4.video?.fileName === 'Brand Teaser v2.mp4', `fileName=${ub4.video?.fileName}`);
+
+      // (g) storage ground truth: the object really landed in the bucket
+      const listed1 = await adminClientE.storage.from('org-videos').list(orgEId);
+      assert('storage bucket holds the uploaded object', !listed1.error && (listed1.data ?? []).length === 1, `error=${listed1.error?.message ?? ''}, count=${listed1.data?.length}`);
+
+      // (h) list as viewer (B3 demoted? no — editor): every member reads
+      const lst1 = await fetch(`${BASE}/api/orgs/${orgEId}/videos`, { headers: b3H });
+      const lb1 = await jsonSafe(lst1);
+      assert('editor video list → 200 with 1 row', lst1.status === 200 && (lb1.videos ?? []).length === 1, `status=${lst1.status}, count=${lb1.videos?.length}`);
+      assert('list row has no analysis yet', lb1.videos?.[0]?.analysis === null && lb1.videos?.[0]?.status === 'uploaded', `row=${JSON.stringify(lb1.videos?.[0] ?? {})}`);
+
+      // (i) analyze: unknown id → 404, malformed id → 400
+      const an1 = await fetch(`${BASE}/api/orgs/${orgEId}/videos/00000000-0000-4000-8000-000000000009/analyze`, {
+        method: 'POST', headers: b3H,
+      });
+      const ab1 = await jsonSafe(an1);
+      assert('analyze unknown video → 404 VIDEO_NOT_FOUND', an1.status === 404 && ab1.error === 'VIDEO_NOT_FOUND', `status=${an1.status}, error=${ab1.error}`);
+      const an2 = await fetch(`${BASE}/api/orgs/${orgEId}/videos/not-a-uuid/analyze`, { method: 'POST', headers: b3H });
+      const ab2 = await jsonSafe(an2);
+      assert('analyze malformed id → 400 INVALID_VIDEO_ID', an2.status === 400 && ab2.error === 'INVALID_VIDEO_ID', `status=${an2.status}, error=${ab2.error}`);
+
+      // (j) editor runs the analysis → 200 with structured suggestions
+      const an3 = await fetch(`${BASE}/api/orgs/${orgEId}/videos/${videoId}/analyze`, { method: 'POST', headers: b3H });
+      const ab3 = await jsonSafe(an3);
+      assert('editor analyze → 200', an3.status === 200, `status=${an3.status}, body=${JSON.stringify(ab3).slice(0, 200)}`);
+      assert('analysis has summary + suggestions', typeof ab3.video?.analysis?.summary === 'string' && Array.isArray(ab3.video?.analysis?.suggestions) && ab3.video.analysis.suggestions.length > 0, `analysis=${JSON.stringify(ab3.video?.analysis ?? {}).slice(0, 200)}`);
+      assert('analysis carries bestPlatforms', Array.isArray(ab3.video?.analysis?.bestPlatforms) && ab3.video.analysis.bestPlatforms.length > 0, `platforms=${JSON.stringify(ab3.video?.analysis?.bestPlatforms ?? [])}`);
+      assert('note explains the analysis source', typeof ab3.note === 'string' && ab3.note.length > 5, `note=${ab3.note}`);
+      // Sandbox .env has no GEMINI_API_KEY → the honest fallback path. If a
+      // key IS configured in the run environment, live Gemini analysis is
+      // equally acceptable — the shape is what must hold either way.
+      if (process.env.GEMINI_API_KEY) {
+        assert('analysisIsFallback is a boolean', typeof ab3.video?.analysisIsFallback === 'boolean', `isFallback=${ab3.video?.analysisIsFallback}`);
+      } else {
+        assert('no key → analysisIsFallback true (honest labelling)', ab3.video?.analysisIsFallback === true, `isFallback=${ab3.video?.analysisIsFallback}`);
+      }
+
+      // (k) list shows the persisted analysis + analyzed status
+      const lst2 = await fetch(`${BASE}/api/orgs/${orgEId}/videos`, { headers: aH });
+      const lb2 = await jsonSafe(lst2);
+      assert('list reflects analyzed status + persisted analysis', lb2.videos?.[0]?.status === 'analyzed' && typeof lb2.videos?.[0]?.analysis?.summary === 'string', `row=${JSON.stringify(lb2.videos?.[0] ?? {}).slice(0, 160)}`);
+
+      // (l) editor CANNOT delete (admin-only mirror of can_admin)
+      const del1 = await fetch(`${BASE}/api/orgs/${orgEId}/videos/${videoId}`, { method: 'DELETE', headers: b3H });
+      const db1 = await jsonSafe(del1);
+      assert('editor delete → 403 VIDEO_DELETE_FORBIDDEN', del1.status === 403 && db1.error === 'VIDEO_DELETE_FORBIDDEN', `status=${del1.status}, error=${db1.error}`);
+
+      // (m) owner deletes → 200; storage object gone (ground truth), row gone
+      const del2 = await fetch(`${BASE}/api/orgs/${orgEId}/videos/${videoId}`, { method: 'DELETE', headers: aH });
+      assert('owner delete → 200', del2.status === 200, `status=${del2.status}`);
+      const lst3 = await fetch(`${BASE}/api/orgs/${orgEId}/videos`, { headers: aH });
+      const lb3 = await jsonSafe(lst3);
+      assert('video list empty after delete', lst3.status === 200 && (lb3.videos ?? []).length === 0, `count=${lb3.videos?.length}`);
+      const listed2 = await adminClientE.storage.from('org-videos').list(orgEId);
+      assert('storage bucket empty after delete (no drift)', !listed2.error && (listed2.data ?? []).length === 0, `error=${listed2.error?.message ?? ''}, count=${listed2.data?.length}`);
+
+      // (n) cleanup org E (cascades membership rows); best-effort storage sweep
+      const stray = await adminClientE.storage.from('org-videos').list(orgEId);
+      if (!stray.error && (stray.data ?? []).length > 0) {
+        await adminClientE.storage.from('org-videos').remove((stray.data ?? []).map(o => `${orgEId}/${o.name}`));
+      }
+      const { error: delEErr } = await adminClientE.from('organizations').delete().eq('id', orgEId);
+      assert('org E cleanup delete succeeded', !delEErr, `error=${delEErr?.message ?? ''}`);
+    }
+  }
+
   console.log('\n─── Test 15: /api/auth/logout with JWT + refreshToken revokes the session ───');
   {
     const res = await fetch(`${BASE}/api/auth/logout`, {

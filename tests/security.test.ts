@@ -633,6 +633,65 @@ async function runAllTests(): Promise<boolean> {
     };
   });
 
+  // 8i-quinquies. P6 video asset endpoints: the same honest 501 in local
+  // mode — requireSupabaseAuth fires before any body parsing (the upload
+  // route's raw parser sits after the auth gate on purpose).
+  await assertTest('Video Upload Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000/videos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'video/mp4', 'x-file-name': 'probe.mp4' },
+      body: new Uint8Array([0, 1, 2, 3]),
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — video upload requires Supabase mode (auth gate before raw parsing)',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Video List Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000/videos`);
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — video listing requires Supabase mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Video Analyze Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000/videos/00000000-0000-4000-8000-000000000009/analyze`, {
+      method: 'POST',
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — video analysis requires Supabase mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
+  await assertTest('Video Delete Returns Honest 501 In Local Mode', async () => {
+    const res = await fetch(`${BASE_URL}/api/orgs/00000000-0000-4000-8000-000000000000/videos/00000000-0000-4000-8000-000000000009`, {
+      method: 'DELETE',
+    });
+    const body = await res.json().catch(() => ({}));
+    const is501 = res.status === 501;
+    const honest = body.error === 'STORAGE_MODE_LOCAL';
+    return {
+      passed: is501 && honest,
+      expected: '501 STORAGE_MODE_LOCAL — video deletion requires Supabase mode',
+      actual: `status=${res.status}, error=${body.error}`,
+    };
+  });
+
   // 8j. Auth endpoints honest 501 in LOCAL storage mode
   // The browser-facing auth routes (/api/auth/signup, /login, /logout, /me)
   // must NOT fake a session when Supabase is not configured. They return 501
